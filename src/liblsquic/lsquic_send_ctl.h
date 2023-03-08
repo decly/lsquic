@@ -33,7 +33,7 @@ struct buf_packet_q
 enum send_ctl_flags {
     SC_TCID0        = (1 << 0),
     SC_NSTP         = (1 << 2),
-    SC_PACE         = (1 << 3),
+    SC_PACE         = (1 << 3),		/* 使用pacing */
     SC_SCHED_TICK   = (1 << 4),
     SC_BUFFER_STREAM= (1 << 5),
     SC_WAS_QUIET    = (1 << 6),
@@ -68,38 +68,40 @@ typedef struct lsquic_send_ctl {
     enum send_ctl_flags             sc_flags;
     enum ecn                        sc_ecn;
     unsigned                        sc_n_stop_waiting;
-    struct lsquic_packets_tailq     sc_unacked_packets[N_PNS];
-    lsquic_packno_t                 sc_largest_acked_packno;
-    lsquic_time_t                   sc_largest_acked_sent_time;
+    struct lsquic_packets_tailq     sc_unacked_packets[N_PNS];	/* 发出后且未被确认的队列, 即链路上的inflight */
+    lsquic_packno_t                 sc_largest_acked_packno;	/* 最大被确认的包号 */
+    lsquic_time_t                   sc_largest_acked_sent_time;	/* 最大被确认的包的发送时间 */
     lsquic_time_t                   sc_last_sent_time;
     lsquic_time_t                   sc_last_rto_time;
     int                           (*sc_can_send)(struct lsquic_send_ctl *);
-    unsigned                        sc_bytes_unacked_retx;
-    unsigned                        sc_bytes_scheduled;
+    unsigned                        sc_bytes_unacked_retx;  /* sc_unacked_packets队列中可被重传的数据总量 */
+    unsigned                        sc_bytes_scheduled;		/* sc_scheduled_packets队列中的数据总量 */
     struct adaptive_cc              sc_adaptive_cc;
     const struct cong_ctl_if       *sc_ci;
     void                           *sc_cong_ctl;
     struct lsquic_engine_public    *sc_enpub;
-    unsigned                        sc_bytes_unacked_all;
-    unsigned                        sc_n_in_flight_all;
-    unsigned                        sc_n_in_flight_retx;
+    unsigned                        sc_bytes_unacked_all;	/* sc_unacked_packets队列中数据总量, 即所有未被确认的大小 */
+    unsigned                        sc_n_in_flight_all;		/* sc_unacked_packets队列中的包个数 */
+    unsigned                        sc_n_in_flight_retx;	/* sc_unacked_packets队列中可被重传的包个数 */
     unsigned                        sc_n_consec_rtos;
     unsigned                        sc_n_hsk;
     unsigned                        sc_n_tlp;
-    enum quic_ft_bit                sc_retx_frames;
+    enum quic_ft_bit                sc_retx_frames;		/* 如果丢失需要重传的帧类型 */
     struct lsquic_alarmset         *sc_alset;
 
     /* Second section: everything else. */
-    struct lsquic_packets_tailq     sc_scheduled_packets,
+    struct lsquic_packets_tailq     sc_scheduled_packets,	/* pacer将要发送的包队列
+								 * 在sendto/sendmsg后, 包会被转移到sc_unacked_packets队列
+								 */
                                     sc_0rtt_stash,
-                                    sc_lost_packets;
+                                    sc_lost_packets;		/* 检测到丢包的包队列 */
     struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1];
     const struct ver_neg           *sc_ver_neg;
     struct lsquic_conn_public      *sc_conn_pub;
     struct pacer                    sc_pacer;
-    lsquic_packno_t                 sc_cur_packno;
-    lsquic_packno_t                 sc_largest_sent_at_cutback;
-    lsquic_packno_t                 sc_max_rtt_packno;
+    lsquic_packno_t                 sc_cur_packno;		/* 当前使用的最大包号 */
+    lsquic_packno_t                 sc_largest_sent_at_cutback;	/* 丢包开始时的发送包号, 类似high_seq */
+    lsquic_packno_t                 sc_max_rtt_packno;		/* rtt更新的包号 */
     /* sc_largest_ack2ed is the packet number sent by peer that we acked and
      * we know that our ACK was received by peer.  This is used to determine
      * the receive history cutoff point for the purposes of generating ACK
@@ -126,7 +128,7 @@ typedef struct lsquic_send_ctl {
         enum buf_packet_type    packet_type;
     }                               sc_cached_bpt;
     unsigned                        sc_next_limit;
-    unsigned                        sc_n_scheduled;
+    unsigned                        sc_n_scheduled;	/* sc_scheduled_packets队列中的包个数 */
     enum packno_bits                sc_max_packno_bits;
 #if LSQUIC_SEND_STATS
     struct {
@@ -143,7 +145,7 @@ typedef struct lsquic_send_ctl {
     lsquic_packno_t                 sc_gap;
     unsigned                        sc_loss_count;  /* Used to set loss bit */
     unsigned                        sc_square_count;/* Used to set square bit */
-    unsigned                        sc_reord_thresh;
+    unsigned                        sc_reord_thresh; /* 乱序值 */
     signed char                     sc_cidlen;      /* For debug purposes */
 } lsquic_send_ctl_t;
 
@@ -425,6 +427,7 @@ lsquic_send_ctl_path_validated (struct lsquic_send_ctl *);
     (lsquic_send_ctl_n_scheduled(ctl_) > 0 \
                 && lsquic_send_ctl_next_packet_to_send_predict(ctl_))
 
+/* 最大确认包号 <= 丢包时的发送包号, 即处于recovery */
 #define lsquic_send_ctl_in_recovery(ctl_) ((ctl_)->sc_largest_acked_packno \
     && (ctl_)->sc_largest_acked_packno <= (ctl_)->sc_largest_sent_at_cutback)
 

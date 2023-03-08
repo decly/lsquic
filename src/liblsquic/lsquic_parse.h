@@ -30,7 +30,9 @@ struct ack_info
     }               flags;
     unsigned    n_ranges;       /* This is at least 1 */
                                 /* Largest acked is ack_info.ranges[0].high */
-    lsquic_time_t   lack_delta;
+    lsquic_time_t   lack_delta;	/* 对端携带的处理时延, 表示应用层延迟
+                                 * 为 对端发送该ACK的时间 - 对端此时收到最大包号的时间
+                                 */
     uint64_t        ecn_counts[4];
     struct lsquic_packno_range ranges[256];
 };

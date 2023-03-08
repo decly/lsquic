@@ -119,6 +119,7 @@ static const size_t kGainCycleLength = sizeof(kPacingGain)
 
 // When in STARTUP and recovery, do not add bytes_acked to QUIC BBR's CWND in
 // CalculateCongestionWindow()
+/* 启用时, startup如果处于recovery则不增加cwnd */
 #define FLAGS_quic_bbr_no_bytes_acked_in_startup_recovery 0
 
 // When true, ensure BBR allows at least one MSS to be sent in response to an
@@ -265,6 +266,7 @@ lsquic_bbr_pacing_rate (void *cong_ctl, int in_recovery)
 
 
 /* BbrSender::GetTargetCongestionWindow */
+/* max_bw * min_rtt * gain */
 static uint64_t
 get_target_cwnd (const struct lsquic_bbr *bbr, float gain)
 {
@@ -339,9 +341,11 @@ lsquic_bbr_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
 
     assert(bbr->bbr_flags & BBR_FLAG_IN_ACK);
 
+    /* 数据包被确认, 计算bw和rtt到sample中 */
     sample = lsquic_bw_sampler_packet_acked(&bbr->bbr_bw_sampler, packet_out,
                                                 bbr->bbr_ack_state.ack_time);
     if (sample)
+        /* 将计算结果samples存到链表中, 等end_ack更新bw和rtt时再用 */
         TAILQ_INSERT_TAIL(&bbr->bbr_ack_state.samples, sample, next);
 
     if (!is_valid_packno(bbr->bbr_ack_state.max_packno)
@@ -511,23 +515,26 @@ update_recovery_state (struct lsquic_bbr *bbr, int is_round_start)
     {
     case BBR_RS_NOT_IN_RECOVERY:
         // Enter conservation on the first loss.
+        /* 出现了丢包, 切换快速恢复状态 */
         if (bbr->bbr_ack_state.has_losses)
         {
             bbr->bbr_recovery_state = BBR_RS_CONSERVATION;
             // This will cause the |bbr_recovery_window| to be set to the
             // correct value in CalculateRecoveryWindow().
-            bbr->bbr_recovery_window = 0;
+            bbr->bbr_recovery_window = 0; /* calculate_recovery_window()中会初始化bbr_recovery_window */
             // Since the conservation phase is meant to be lasting for a whole
             // round, extend the current round as if it were started right now.
+            /* 为了让BBR_RS_CONSERVATION状态完整一个round */
             bbr->bbr_current_round_trip_end = bbr->bbr_last_sent_packno;
         }
         break;
     case BBR_RS_CONSERVATION:
-        if (is_round_start)
+        if (is_round_start) /* 一个round后切换为BBR_RS_GROWTH */
             bbr->bbr_recovery_state = BBR_RS_GROWTH;
         /* Fall-through */
     case BBR_RS_GROWTH:
         // Exit recovery if appropriate.
+        /* 必须完整一轮没有丢包才退出快速恢复 */
         if (!bbr->bbr_ack_state.has_losses
                 && bbr->bbr_ack_state.max_packno > bbr->bbr_end_recovery_at)
             bbr->bbr_recovery_state = BBR_RS_NOT_IN_RECOVERY;
@@ -767,7 +774,7 @@ lsquic_bbr_get_cwnd (void *cong_ctl)
 
     if (bbr->bbr_mode == BBR_MODE_PROBE_RTT)
         cwnd = get_probe_rtt_cwnd(bbr);
-    else if (in_recovery(bbr) &&
+    else if (in_recovery(bbr) && /* 快速恢复状态使用bbr_recovery_window */
                 !((bbr->bbr_flags & BBR_FLAG_RATE_BASED_STARTUP)
                                     && bbr->bbr_mode == BBR_MODE_STARTUP))
         cwnd = MIN(bbr->bbr_cwnd, bbr->bbr_recovery_window);
@@ -786,7 +793,7 @@ maybe_enter_or_exit_probe_rtt (struct lsquic_bbr *bbr, lsquic_time_t now,
     if (min_rtt_expired
             && !(bbr->bbr_flags & BBR_FLAG_EXITING_QUIESCENCE)
                 && bbr->bbr_mode != BBR_MODE_PROBE_RTT)
-    {
+    {	/* 进入probe_rtt */
         if (in_slow_start(bbr))
             on_exit_startup(bbr, now);
         set_mode(bbr, BBR_MODE_PROBE_RTT);
@@ -823,7 +830,7 @@ maybe_enter_or_exit_probe_rtt (struct lsquic_bbr *bbr, lsquic_time_t now,
                 bbr->bbr_flags |= BBR_FLAG_PROBE_RTT_ROUND_PASSED;
             if (now >= bbr->bbr_exit_probe_rtt_at
                         && (bbr->bbr_flags & BBR_FLAG_PROBE_RTT_ROUND_PASSED))
-            {
+            {	/* 退出probe_rtt */
                 bbr->bbr_min_rtt_timestamp = now;
                 if (!(bbr->bbr_flags & BBR_FLAG_IS_AT_FULL_BANDWIDTH))
                     enter_startup_mode(bbr, now);
@@ -909,14 +916,14 @@ calculate_cwnd (struct lsquic_bbr *bbr, uint64_t bytes_acked,
     if (bbr->bbr_mode == BBR_MODE_PROBE_RTT)
         return;
 
-    uint64_t target_window = get_target_cwnd(bbr, bbr->bbr_cwnd_gain);
+    uint64_t target_window = get_target_cwnd(bbr, bbr->bbr_cwnd_gain); /* 目标cwnd */
     if (bbr->bbr_flags & BBR_FLAG_IS_AT_FULL_BANDWIDTH)
         // Add the max recently measured ack aggregation to CWND.
-        target_window += minmax_get(&bbr->bbr_max_ack_height);
-    else if (bbr->bbr_flags & BBR_FLAG_ENABLE_ACK_AGG_IN_STARTUP)
+        target_window += minmax_get(&bbr->bbr_max_ack_height); /* probe_bw增加最大帧聚合大小 */
+    else if (bbr->bbr_flags & BBR_FLAG_ENABLE_ACK_AGG_IN_STARTUP) /* 如果startup使用帧聚合 */
         // Add the most recent excess acked.  Because CWND never decreases in
         // STARTUP, this will automatically create a very localized max filter.
-        target_window += excess_acked;
+        target_window += excess_acked; /* startup只增加最近的帧聚合大小 */
 
     // Instead of immediately setting the target CWND as the new one, BBR grows
     // the CWND towards |target_window| by only increasing it |bytes_acked| at a
@@ -924,14 +931,14 @@ calculate_cwnd (struct lsquic_bbr *bbr, uint64_t bytes_acked,
     const int add_bytes_acked =
 	!FLAGS_quic_bbr_no_bytes_acked_in_startup_recovery || !in_recovery(bbr);
     if (bbr->bbr_flags & BBR_FLAG_IS_AT_FULL_BANDWIDTH)
-        bbr->bbr_cwnd = MIN(target_window, bbr->bbr_cwnd + bytes_acked);
+        bbr->bbr_cwnd = MIN(target_window, bbr->bbr_cwnd + bytes_acked); /* probe_bw */
     else if (add_bytes_acked &&
              (bbr->bbr_cwnd < target_window ||
               lsquic_bw_sampler_total_acked(&bbr->bbr_bw_sampler)
                                                         < bbr->bbr_init_cwnd))
         // If the connection is not yet out of startup phase, do not decrease
         // the window.
-        bbr->bbr_cwnd += bytes_acked;
+        bbr->bbr_cwnd += bytes_acked; /* startup不会减少cwnd */
 
     // Enforce the limits on the congestion window.
     if (bbr->bbr_cwnd < bbr->bbr_min_cwnd)
@@ -949,14 +956,17 @@ static void
 calculate_recovery_window (struct lsquic_bbr *bbr, uint64_t bytes_acked,
                                 uint64_t bytes_lost, uint64_t bytes_in_flight)
 {
+    /* startup不启用快速恢复的窗口 */
     if ((bbr->bbr_flags & BBR_FLAG_RATE_BASED_STARTUP)
                                         && bbr->bbr_mode == BBR_MODE_STARTUP)
         return;
 
+    /* 无丢包状态直接返回 */
     if (bbr->bbr_recovery_state == BBR_RS_NOT_IN_RECOVERY)
         return;
 
     // Set up the initial recovery window.
+    /* 刚进入recovery, 初始化bbr_recovery_window为inflight + acked */
     if (bbr->bbr_recovery_window == 0)
     {
         bbr->bbr_recovery_window = bytes_in_flight + bytes_acked;
@@ -967,6 +977,7 @@ calculate_recovery_window (struct lsquic_bbr *bbr, uint64_t bytes_acked,
 
     // Remove losses from the recovery window, while accounting for a potential
     // integer underflow.
+    /* 丢包则cwnd减掉丢包量 */
     if (bbr->bbr_recovery_window >= bytes_lost)
         bbr->bbr_recovery_window -= bytes_lost;
     else
@@ -974,6 +985,7 @@ calculate_recovery_window (struct lsquic_bbr *bbr, uint64_t bytes_acked,
 
     // In CONSERVATION mode, just subtracting losses is sufficient.  In GROWTH,
     // release additional |bytes_acked| to achieve a slow-start-like behavior.
+    /* BBR_RS_GROWTH 状态慢启动增加cwnd */
     if (bbr->bbr_recovery_state == BBR_RS_GROWTH)
         bbr->bbr_recovery_window += bytes_acked;
 
@@ -1003,7 +1015,13 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
 
     bytes_acked = lsquic_bw_sampler_total_acked(&bbr->bbr_bw_sampler)
                             - bbr->bbr_ack_state.total_bytes_acked_before;
-    if (bbr->bbr_ack_state.acked_bytes)
+    /*  代码来看下面的acked_bytes对比上面bytes_acked还包括了:
+     *   1.丢失记录指向原始包的大小(乱序时)
+     *   2.bwp_state内存分配失败(lsquic_bw_sampler_packet_sent()中)
+     *  的packet被确认, 更偏向真实被确认的大小,
+     *  不知为何这个bbr中不使用该变量计算
+     */
+    if (bbr->bbr_ack_state.acked_bytes) /* ACK有确认数据 */
     {
         is_round_start = bbr->bbr_ack_state.max_packno
                                     > bbr->bbr_current_round_trip_end
@@ -1015,8 +1033,11 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
             LSQ_DEBUG("up round count to %"PRIu64"; new rt end: %"PRIu64,
                         bbr->bbr_round_count, bbr->bbr_current_round_trip_end);
         }
+        /* 更新bbr_max_bandwidth和bbr_min_rtt */
         min_rtt_expired = update_bandwidth_and_min_rtt(bbr);
+        /* 丢包时切换丢包恢复状态 */
         update_recovery_state(bbr, is_round_start);
+        /* 处理帧聚合, 返回超过速率的字节(即聚合的大小) */
         excess_acked = update_ack_aggregation_bytes(bbr, bytes_acked);
     }
     else
@@ -1026,14 +1047,18 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
         excess_acked = 0;
     }
 
+    /* 更新probe_bw的8个周期 */
     if (bbr->bbr_mode == BBR_MODE_PROBE_BW)
         update_gain_cycle_phase(bbr, in_flight);
 
+    /* startup检测带宽是否满 */
     if (is_round_start && !(bbr->bbr_flags & BBR_FLAG_IS_AT_FULL_BANDWIDTH))
         check_if_full_bw_reached(bbr);
 
+    /* bbr状态机模式切换: startup -> drain -> probe_bw */
     maybe_exit_startup_or_drain(bbr, bbr->bbr_ack_state.ack_time, in_flight);
 
+    /* 进入和退出probe_rtt模式 */
     maybe_enter_or_exit_probe_rtt(bbr, bbr->bbr_ack_state.ack_time,
                                 is_round_start, min_rtt_expired, in_flight);
 
@@ -1042,9 +1067,12 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
 
     // After the model is updated, recalculate the pacing rate and congestion
     // window.
+    /* 以上为各种状态更新
+     * 接下来计算 pacing_rate 和 cwnd, recovery时的cwnd
+     */
     calculate_pacing_rate(bbr);
     calculate_cwnd(bbr, bytes_acked, excess_acked);
-    calculate_recovery_window(bbr, bytes_acked, bytes_lost, in_flight);
+    calculate_recovery_window(bbr, bytes_acked, bytes_lost, in_flight); /* 计算快速恢复窗口 */
 
     /* We don't need to clean up BW sampler */
 }
@@ -1072,7 +1100,7 @@ const struct cong_ctl_if lsquic_cong_bbr_if =
 {
     .cci_ack           = lsquic_bbr_ack,
     .cci_begin_ack     = lsquic_bbr_begin_ack,
-    .cci_end_ack       = lsquic_bbr_end_ack,
+    .cci_end_ack       = lsquic_bbr_end_ack,	/* 核心函数 */
     .cci_cleanup       = lsquic_bbr_cleanup,
     .cci_get_cwnd      = lsquic_bbr_get_cwnd,
     .cci_init          = lsquic_bbr_init,

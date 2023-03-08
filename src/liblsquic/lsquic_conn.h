@@ -48,13 +48,14 @@ enum lsquic_conn_flags {
     LSCONN_VER_SET        = (1 <<10),   /* cn_version is set */
     LSCONN_EVANESCENT     = (1 <<11),   /* evanescent connection */
     LSCONN_TICKABLE       = (1 <<12),   /* Connection is in the Tickable Queue */
+    					/* 连接被加入了conns_tickable队列 */
     LSCONN_COI_ACTIVE     = (1 <<13),
     LSCONN_COI_INACTIVE   = (1 <<14),
     LSCONN_SEND_BLOCKED   = (1 <<15),   /* Send connection blocked frame */
     LSCONN_PROMOTED       = (1 <<16),   /* Promoted.  Only set if LSCONN_MINI is set */
     LSCONN_NEVER_TICKABLE = (1 <<17),   /* Do not put onto the Tickable Queue */
     LSCONN_UNUSED_18      = (1 <<18),
-    LSCONN_ATTQ           = (1 <<19),
+    LSCONN_ATTQ           = (1 <<19),	/* 连接被加入了ATTQ队列中 */
     LSCONN_SKIP_ON_PROC   = (1 <<20),
     LSCONN_UNUSED_21      = (1 <<21),
     LSCONN_SERVER         = (1 <<22),
@@ -342,7 +343,7 @@ struct lsquic_conn
     const struct parse_funcs    *cn_pf;
     struct attq_elem            *cn_attq_elem;
     lsquic_time_t                cn_last_sent;
-    lsquic_time_t                cn_last_ticked;
+    lsquic_time_t                cn_last_ticked;	/* 被conns_tickable处理的时间 */
     struct conn_cid_elem        *cn_cces;   /* At least one is available */
     lsquic_conn_ctx_t           *cn_conn_ctx;
     enum lsquic_conn_flags       cn_flags;

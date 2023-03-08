@@ -91,6 +91,9 @@ bw_sampler_abort_conn (struct bw_sampler *sampler)
     }                                                                       \
 } while (0)
 
+/* 数据包发送时记录状态到packet_out->po_bwp_state,
+ * 等到被确认时用来计算bw和rtt
+ */
 void
 lsquic_bw_sampler_packet_sent (struct bw_sampler *sampler,
                     struct lsquic_packet_out *packet_out, uint64_t in_flight)
@@ -167,6 +170,7 @@ lsquic_bw_sampler_packet_lost (struct bw_sampler *sampler,
 }
 
 
+/* 数据包被确认, 计算bw和rtt */
 struct bw_sample *
 lsquic_bw_sampler_packet_acked (struct bw_sampler *sampler,
                 struct lsquic_packet_out *packet_out, lsquic_time_t ack_time)
@@ -240,6 +244,9 @@ lsquic_bw_sampler_packet_acked (struct bw_sampler *sampler,
 
     /* After this point, we switch `sample' to point to `state' and don't
      * reference `state' anymore.
+     */
+    /* 这里将packet_out->po_bwp_state这块内存强制转为sample重复使用
+     * 等bbr里更新完带宽和rtt后再释放掉: update_bandwidth_and_min_rtt()
      */
     sample = (void *) packet_out->po_bwp_state;
     packet_out->po_bwp_state = NULL;

@@ -17,8 +17,8 @@ struct min_heap_elem
 struct min_heap
 {
     struct min_heap_elem    *mh_elems;
-    unsigned                 mh_nalloc,
-                             mh_nelem;
+    unsigned                 mh_nalloc,	/* 当前分配的个数 */
+                             mh_nelem;	/* 当前使用个数 */
 };
 
 

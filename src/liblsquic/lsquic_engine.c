@@ -243,14 +243,19 @@ struct lsquic_engine
     lsquic_cids_update_f               report_old_scids;
     void                              *scids_ctx;
     struct lsquic_hash                *conns_hash;
-    struct min_heap                    conns_tickable;
+    struct min_heap                    conns_tickable;	/* 需要立即被process_connections处理的连接队列(堆排序),
+							 * 按照conn->cn_last_ticked从小到大排序
+							 */
     struct min_heap                    conns_out;
     struct eng_hist                    history;
     unsigned                           batch_size;
     unsigned                           min_batch_size, max_batch_size;
     struct lsquic_conn                *curr_conn;
     struct pr_queue                   *pr_queue;
-    struct attq                       *attq;
+    struct attq                       *attq;		/* 定时器队列, 比如pacing先将连接加入到attq中
+    							 * 等到时间到期时再从attq中移到conns_tickable中
+							 * 详见lsquic_engine_process_conns()
+							 */
     /* Track time last time a packet was sent to give new connections
      * priority lower than that of existing connections.
      */
@@ -1475,6 +1480,7 @@ lsquic_engine_add_conn_to_tickable (struct lsquic_engine_public *enpub,
         0 == (conn->cn_flags & (LSCONN_TICKABLE|LSCONN_NEVER_TICKABLE)))
     {
         lsquic_engine_t *engine = (lsquic_engine_t *) enpub;
+	/* 将连接按照cn_last_ticked排序插入conns_tickable堆中 */
         lsquic_mh_insert(&engine->conns_tickable, conn, conn->cn_last_ticked);
         engine_incref_conn(conn, LSCONN_TICKABLE);
     }
@@ -1487,14 +1493,14 @@ lsquic_engine_add_conn_to_attq (struct lsquic_engine_public *enpub,
 {
     lsquic_engine_t *const engine = (lsquic_engine_t *) enpub;
     if (conn->cn_flags & LSCONN_TICKABLE)
-    {
+    { /* 连接已经在conns_tickable中了, 下个tick会被处理 */
         /* Optimization: no need to add the connection to the Advisory Tick
          * Time Queue: it is about to be ticked, after which it its next tick
          * time may be queried again.
          */;
     }
     else if (conn->cn_flags & LSCONN_ATTQ)
-    {
+    { /* 连接已经在ATTQ队列中了, 如果到期时间有变化则重新加入 */
         if (lsquic_conn_adv_time(conn) != tick_time)
         {
             lsquic_attq_remove(engine->attq, conn);
@@ -1502,6 +1508,7 @@ lsquic_engine_add_conn_to_attq (struct lsquic_engine_public *enpub,
                 engine_decref_conn(engine, conn, LSCONN_ATTQ);
         }
     }
+    /* 加入ATTQ队列里 */
     else if (0 == lsquic_attq_add(engine->attq, conn, tick_time, why))
         engine_incref_conn(conn, LSCONN_ATTQ);
 }
@@ -2082,6 +2089,7 @@ lsquic_engine_process_conns (lsquic_engine_t *engine)
     ENGINE_IN(engine);
 
     now = lsquic_time_now();
+    /* 先从attq队列中取出到期的conn加入到conns_tickable中 */
     while ((conn = lsquic_attq_pop(engine->attq, now)))
     {
         conn = engine_decref_conn(engine, conn, LSCONN_ATTQ);
@@ -2092,6 +2100,7 @@ lsquic_engine_process_conns (lsquic_engine_t *engine)
         }
     }
 
+    /* 处理所有需要发送连接 */
     process_connections(engine, conn_iter_next_tickable, now);
     ENGINE_OUT(engine);
 }
@@ -2903,16 +2912,17 @@ process_connections (lsquic_engine_t *engine, conn_iter_f next_conn,
     }
 
     i = 0;
+    /* 遍历所有被加入engine->conns_tickable的连接 以及 新连接 */
     while ((conn = next_conn(engine))
                             || (conn = next_new_full_conn(&new_full_conns)))
     {
-        tick_st = conn->cn_if->ci_tick(conn, now);
+        tick_st = conn->cn_if->ci_tick(conn, now); /* full conn调用tick: ietf_full_conn_ci_tick */
 #if LSQUIC_CONN_STATS
         if (conn == engine->busy.current)
             maybe_log_conn_stats(engine, conn, now);
 #endif
         conn->cn_last_ticked = now + i /* Maintain relative order */ ++;
-        if (tick_st & TICK_PROMOTE)
+        if (tick_st & TICK_PROMOTE) /* mini转为full conn的新连接 */
         {
             lsquic_conn_t *new_conn;
             EV_LOG_CONN_EVENT(lsquic_conn_log_cid(conn),
@@ -2979,9 +2989,13 @@ process_connections (lsquic_engine_t *engine, conn_iter_f next_conn,
         }
         else if (!(conn->cn_flags & LSCONN_ATTQ))
         {
+	    /* 获取下次最近tick的时间: 比如pacing时间或定时器 */
             next_tick_time = conn->cn_if->ci_next_tick_time(conn, &why);
             if (next_tick_time)
             {
+		/* 加入到attq中, 等到lsquic_engine_process_conns被调用时,
+		 * 会取出到期的conn(通过next_tick_time判断到期)加入到conns_tickable中
+		 */
                 if (0 == lsquic_attq_add(engine->attq, conn, next_tick_time,
                                                                         why))
                     engine_incref_conn(conn, LSCONN_ATTQ);

@@ -75,13 +75,18 @@ typedef struct lsquic_packet_out
      */
     TAILQ_ENTRY(lsquic_packet_out)
                        po_next;
-    lsquic_time_t      po_sent;       /* Time sent */
-    lsquic_packno_t    po_packno;
+    lsquic_time_t      po_sent;       /* Time sent *//* 发送时间 */
+    lsquic_packno_t    po_packno;	/* 包号 */
     lsquic_packno_t    po_ack2ed;       /* If packet has ACK frame, value of
                                          * largest acked in it.
                                          */
     struct lsquic_packet_out
                       *po_loss_chain;   /* Circular linked list */
+                                        /* 循环链表, 默认指向packet自身
+                                         * 在丢包时会将所有丢失记录链入, 然后在数据被确认时
+                                         * 就可以通过该链表来删除packet和所有丢失记录
+                                         * 详见send_ctl_destroy_chain()
+                                         */
 
     enum quic_ft_bit   po_frame_types;  /* Bitmask of QUIC_FRAME_* */
     enum packet_out_flags {
@@ -108,8 +113,8 @@ typedef struct lsquic_packet_out
                     = (1 <<13),         /* STREAM frame reaches the end of the packet: no
                                          * further writes are allowed.
                                          */
-        PO_SCHED    = (1 <<14),         /* On scheduled queue */
-        PO_SENT_SZ  = (1 <<15),
+        PO_SCHED    = (1 <<14),         /* On scheduled queue *//* 表示在sc_scheduled_packets队列中 */
+        PO_SENT_SZ  = (1 <<15),		/* 丢失记录设置该标记然后将包大小保存到po_sent_sz中 */
         PO_LONGHEAD = (1 <<16),
 #define POIPv6_SHIFT 20
         PO_IPv6     = (1 <<20),         /* Set if pmi_allocate was passed is_ipv6=1,
@@ -121,20 +126,24 @@ typedef struct lsquic_packet_out
         PO_PNS_APP  = (1 <<23),         /*   packet number space. */
         PO_RETRY    = (1 <<24),         /* Retry packet */
         PO_RETX     = (1 <<25),         /* Retransmitted packet: don't append to it */
+					/* 表示重传包 */
         PO_POISON   = (1 <<26),         /* Used to detect opt-ACK attack */
-        PO_LOSS_REC = (1 <<27),         /* This structure is a loss record */
+        PO_LOSS_REC = (1 <<27),         /* This structure is a loss record *//* 表示一个丢包记录 */
         /* Only one of PO_SCHED, PO_UNACKED, or PO_LOST can be set.  If pressed
          * for room in the enum, we can switch to using two bits to represent
          * this information.
          */
-        PO_UNACKED  = (1 <<28),         /* On unacked queue */
-        PO_LOST     = (1 <<29),         /* On lost queue */
+        PO_UNACKED  = (1 <<28),         /* On unacked queue *//* 在sc_unacked_packets队列中 */
+        PO_LOST     = (1 <<29),         /* On lost queue *//* 在sc_lost_packets丢包队列中 */
 #define POSPIN_SHIFT 30
         PO_SPIN_BIT = (1 <<30),         /* Value of the spin bit */
     }                  po_flags;
     unsigned short     po_data_sz;      /* Number of usable bytes in data */
     unsigned short     po_enc_data_sz;  /* Number of usable bytes in data */
     unsigned short     po_sent_sz;      /* If PO_SENT_SZ is set, real size of sent buffer. */
+    					/* 如果PO_SENT_SZ置位, 那么该值为包大小
+					 * 比如丢失记录(PO_LOSS_REC)保存着原始包大小
+					 */
     /* TODO Revisit po_regen_sz once gQUIC is dropped.  Now that all frames
      * are recorded, we have more flexibility where to place ACK frames; they
      * no longer really have to be at the beginning of the packet, since we
@@ -166,7 +175,7 @@ typedef struct lsquic_packet_out
         POL_HEADER_PROT = 1 << 9,       /* Header protection applied */
 #endif
         POL_LIMITED     = 1 << 10,      /* Used to credit sc_next_limit if needed. */
-        POL_FACKED   = 1 << 11,         /* Lost due to FACK check */
+        POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK检测丢失 */
     }                  po_lflags:16;
     unsigned char     *po_data;
 
@@ -189,7 +198,7 @@ typedef struct lsquic_packet_out
     const struct network_path
                       *po_path;
 #define po_token po_nonce
-    struct bwp_state  *po_bwp_state;
+    struct bwp_state  *po_bwp_state;	/* 记录状态, 用于被确认时bbr计算bw */
 } lsquic_packet_out_t;
 
 /* This is to make sure these bit names are not used, they are only for

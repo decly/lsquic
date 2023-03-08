@@ -8,16 +8,19 @@ struct pacer
 {
     const struct lsquic_conn
                    *pa_conn;             /* Used for logging */
-    lsquic_time_t   pa_next_sched;
+    lsquic_time_t   pa_next_sched;	/* 下个包的发送时间 */
     lsquic_time_t   pa_last_delayed;
-    lsquic_time_t   pa_now;
+    lsquic_time_t   pa_now;		/* 本次tick的起始时间 */
 
     /* All tick times are in microseconds */
 
-    unsigned        pa_clock_granularity;
+    unsigned        pa_clock_granularity; /* 调度的粒度, 单位微妙, 默认1000微妙 */
 
-    unsigned        pa_burst_tokens;
+    unsigned        pa_burst_tokens;	/* 不参与pacing的令牌个数, 为10个
+					 * 即连接一开始或idle restart后前10个包直接发送
+					 */
     unsigned        pa_n_scheduled;     /* Within single tick */
+    					/* 一个tick内设置调度的次数 */
     enum {
         PA_LAST_SCHED_DELAYED   = (1 << 0),
         PA_DELAYED_ON_TICK_IN   = (1 << 1),

@@ -41,20 +41,20 @@ struct lsquic_bbr
         BBR_MODE_DRAIN,
         BBR_MODE_PROBE_BW,
         BBR_MODE_PROBE_RTT,
-    }                           bbr_mode;
+    }                           bbr_mode;	/* bbr状态机模式 */
 
     enum
     {
-        BBR_RS_NOT_IN_RECOVERY,
-        BBR_RS_CONSERVATION,
-        BBR_RS_GROWTH,
-    }                           bbr_recovery_state;
+        BBR_RS_NOT_IN_RECOVERY,	/* 无丢包, 丢包后会进入BBR_RS_CONSERVATION */
+        BBR_RS_CONSERVATION,	/* 保守模式, 不增加cwnd且丢包减cwnd, 持续完整一轮后进入BBR_RS_GROWTH */
+        BBR_RS_GROWTH,		/* 慢启动增加cwnd但丢包也减cwnd, 连续一轮没有丢包才会回到BBR_RS_NOT_IN_RECOVERY */
+    }                           bbr_recovery_state;	/* 快速恢复状态 */
 
     enum
     {
         BBR_FLAG_IN_ACK                  = 1 << 0,   /* cci_begin_ack() has been called */
-        BBR_FLAG_LAST_SAMPLE_APP_LIMITED = 1 << 1,
-        BBR_FLAG_HAS_NON_APP_LIMITED     = 1 << 2,
+        BBR_FLAG_LAST_SAMPLE_APP_LIMITED = 1 << 1,	/* ACK的最高包号有没有app limited */
+        BBR_FLAG_HAS_NON_APP_LIMITED     = 1 << 2,	/* 曾经存在没有被app limited */
         BBR_FLAG_APP_LIMITED_SINCE_LAST_PROBE_RTT
                                          = 1 << 3,
         BBR_FLAG_PROBE_RTT_DISABLED_IF_APP_LIMITED
@@ -62,7 +62,7 @@ struct lsquic_bbr
         BBR_FLAG_PROBE_RTT_SKIPPED_IF_SIMILAR_RTT
                                          = 1 << 5,
         BBR_FLAG_EXIT_STARTUP_ON_LOSS    = 1 << 6,
-        BBR_FLAG_IS_AT_FULL_BANDWIDTH    = 1 << 7,
+        BBR_FLAG_IS_AT_FULL_BANDWIDTH    = 1 << 7,	/* startup探测到带宽满(3轮带宽没涨25%) */
         BBR_FLAG_EXITING_QUIESCENCE      = 1 << 8,
         BBR_FLAG_PROBE_RTT_ROUND_PASSED  = 1 << 9,
         BBR_FLAG_FLEXIBLE_APP_LIMITED    = 1 << 10,
@@ -75,24 +75,24 @@ struct lsquic_bbr
                                          = 1 << 12,
         // If true, use a CWND of 0.75*BDP during probe_rtt instead of 4
         // packets.
-        BBR_FLAG_PROBE_RTT_BASED_ON_BDP  = 1 << 13,
+        BBR_FLAG_PROBE_RTT_BASED_ON_BDP  = 1 << 13,	/* 设置后probe_rtt模式inflight降为0.75*BDP, 而不是4个包 */
         // When true, pace at 1.5x and disable packet conservation in STARTUP.
         BBR_FLAG_SLOWER_STARTUP          = 1 << 14,
         // When true, add the most recent ack aggregation measurement during STARTUP.
         BBR_FLAG_ENABLE_ACK_AGG_IN_STARTUP
                                          = 1 << 15,
         // When true, disables packet conservation in STARTUP.
-        BBR_FLAG_RATE_BASED_STARTUP      = 1 << 16,
+        BBR_FLAG_RATE_BASED_STARTUP      = 1 << 16, /* 设置后startup不启用快速恢复的cwnd */
     }                           bbr_flags;
 
     // Number of round-trips in PROBE_BW mode, used for determining the current
     // pacing gain cycle.
-    unsigned                    bbr_cycle_current_offset;
+    unsigned                    bbr_cycle_current_offset;	/* probe_bw周期的pacing_gain索引 */
 
     const struct lsquic_rtt_stats
                                *bbr_rtt_stats;
 
-    struct bw_sampler           bbr_bw_sampler;
+    struct bw_sampler           bbr_bw_sampler;	/* 用于收发包时的带宽等各种统计 */
 
     /*
      " BBR.BtlBwFilter: The max filter used to estimate BBR.BtlBw.
@@ -115,7 +115,7 @@ struct lsquic_bbr
     lsquic_time_t               bbr_aggregation_epoch_start_time;
     uint64_t                    bbr_aggregation_epoch_bytes;
 
-    lsquic_packno_t             bbr_last_sent_packno;
+    lsquic_packno_t             bbr_last_sent_packno;	/* 最新发送的包号 */
     lsquic_packno_t             bbr_current_round_trip_end;
 
     // Receiving acknowledgement of a packet after |bbr_end_recovery_at| will
@@ -126,7 +126,7 @@ struct lsquic_bbr
     /*
      " BBR.round_count: Count of packet-timed round trips.
      */
-    uint64_t                    bbr_round_count;
+    uint64_t                    bbr_round_count;	/* 当前轮数 */
 
     /* Not documented in the draft: */
     uint64_t                    bbr_full_bw;
@@ -184,24 +184,24 @@ struct lsquic_bbr
 
     lsquic_time_t               bbr_min_rtt_since_last_probe;
     lsquic_time_t               bbr_min_rtt;
-    lsquic_time_t               bbr_min_rtt_timestamp;
+    lsquic_time_t               bbr_min_rtt_timestamp;	/* bbr_min_rtt更新的时间 */
 
     // A window used to limit the number of bytes in flight during loss recovery
-    uint64_t                    bbr_recovery_window;
+    uint64_t                    bbr_recovery_window;	/* 快速恢复(有丢包)时的cwnd */
 
     /* Accumulate information from a single ACK.  Gets processed when
      * cci_end_ack() is called.
      */
-    struct
+    struct /* 用来记录本次ACK的具体数据(每次ACK重置) */
     {
-        TAILQ_HEAD(, bw_sample) samples;
-        lsquic_time_t       ack_time;
-        lsquic_packno_t     max_packno;
-        uint64_t            acked_bytes;
-        uint64_t            lost_bytes;
-        uint64_t            total_bytes_acked_before;
-        uint64_t            in_flight;
-        int                 has_losses;
+        TAILQ_HEAD(, bw_sample) samples;	/* 保存ACK确认的每个包计算得到的bw和rtt */
+        lsquic_time_t       ack_time;		/* 本次ACK到达时间 */
+        lsquic_packno_t     max_packno;		/* 本次ACK确认的最大包号 */
+        uint64_t            acked_bytes;	/* 本次ACK确认的字节数 */
+        uint64_t            lost_bytes;		/* 本次ACK检测到丢包的字节数 */
+        uint64_t            total_bytes_acked_before; /* 本次ACK到达前的总acked字节数 */
+        uint64_t            in_flight;		/* 本次ACK到达前的inflight */
+        int                 has_losses;		/* 本次ACK有检测到丢包 */
     }                           bbr_ack_state;
 };
 
