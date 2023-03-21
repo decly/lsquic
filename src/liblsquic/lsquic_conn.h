@@ -344,7 +344,7 @@ struct lsquic_conn
     struct attq_elem            *cn_attq_elem;
     lsquic_time_t                cn_last_sent;
     lsquic_time_t                cn_last_ticked;	/* 被conns_tickable处理的时间 */
-    struct conn_cid_elem        *cn_cces;   /* At least one is available */
+    struct conn_cid_elem        *cn_cces;           /* At least one is available */
     lsquic_conn_ctx_t           *cn_conn_ctx;
     enum lsquic_conn_flags       cn_flags;
     enum lsquic_version          cn_version:8;

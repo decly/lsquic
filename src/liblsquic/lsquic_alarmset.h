@@ -15,16 +15,16 @@ typedef void (*lsquic_alarm_cb_f)(enum alarm_id, void *cb_ctx,
                                   lsquic_time_t expiry, lsquic_time_t now);
 
 typedef struct lsquic_alarm {
-    lsquic_alarm_cb_f           callback;
-    void                       *cb_ctx;
+    lsquic_alarm_cb_f           callback;   /* 定时器回调函数 */
+    void                       *cb_ctx;     /* 回调参数 */
 } lsquic_alarm_t;
 
 
 enum alarm_id {
     AL_HANDSHAKE,
-    AL_RETX_INIT,
-    AL_RETX_HSK = AL_RETX_INIT + PNS_HSK,
-    AL_RETX_APP = AL_RETX_INIT + PNS_APP,
+    AL_RETX_INIT,                           /* 重传定时器, 回调函数retx_alarm_rings */
+    AL_RETX_HSK = AL_RETX_INIT + PNS_HSK,   /* 重传定时器, 回调函数retx_alarm_rings */
+    AL_RETX_APP = AL_RETX_INIT + PNS_APP,   /* 重传定时器, 回调函数retx_alarm_rings */
     AL_PING,
     AL_MTU_PROBE,
     AL_IDLE,
@@ -64,11 +64,11 @@ enum alarm_id_bit {
 };
 
 
-typedef struct lsquic_alarmset {
-    enum alarm_id_bit           as_armed_set;
-    lsquic_time_t               as_expiry[MAX_LSQUIC_ALARMS];
+typedef struct lsquic_alarmset { /* 定时器集合, 所有定时器类型详见enum alarm_id */
+    enum alarm_id_bit           as_armed_set;   /* 各类定时器被激活的标志位 */
+    lsquic_time_t               as_expiry[MAX_LSQUIC_ALARMS]; /* 各类定时器的超时时间 */
     const struct lsquic_conn   *as_conn;    /* Used for logging */
-    struct lsquic_alarm         as_alarms[MAX_LSQUIC_ALARMS];
+    struct lsquic_alarm         as_alarms[MAX_LSQUIC_ALARMS]; /* 各定时器 */
 } lsquic_alarmset_t;
 
 

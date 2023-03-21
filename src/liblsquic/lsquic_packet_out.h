@@ -106,7 +106,7 @@ typedef struct lsquic_packet_out
         PO_NONCE    = (1 << 7),         /* Use value in `po_nonce' to generate header */
         PO_VERSION  = (1 << 8),         /* Use value in `po_ver_tag' to generate header */
         PO_CONN_ID  = (1 << 9),         /* Include connection ID in public header */
-        PO_REPACKNO = (1 <<10),         /* Regenerate packet number */
+        PO_REPACKNO = (1 <<10),         /* Regenerate packet number *//* 表示需要重新设置包号 */
         PO_NOENCRYPT= (1 <<11),         /* Do not encrypt data in po_data */
         PO_VERNEG   = (1 <<12),         /* Version negotiation packet. */
         PO_STREAM_END
@@ -114,7 +114,7 @@ typedef struct lsquic_packet_out
                                          * further writes are allowed.
                                          */
         PO_SCHED    = (1 <<14),         /* On scheduled queue *//* 表示在sc_scheduled_packets队列中 */
-        PO_SENT_SZ  = (1 <<15),		/* 丢失记录设置该标记然后将包大小保存到po_sent_sz中 */
+        PO_SENT_SZ  = (1 <<15),         /* 丢失记录设置该标记然后将包大小保存到po_sent_sz中 */
         PO_LONGHEAD = (1 <<16),
 #define POIPv6_SHIFT 20
         PO_IPv6     = (1 <<20),         /* Set if pmi_allocate was passed is_ipv6=1,
@@ -126,7 +126,7 @@ typedef struct lsquic_packet_out
         PO_PNS_APP  = (1 <<23),         /*   packet number space. */
         PO_RETRY    = (1 <<24),         /* Retry packet */
         PO_RETX     = (1 <<25),         /* Retransmitted packet: don't append to it */
-					/* 表示重传包 */
+                                        /* 表示重传包 */
         PO_POISON   = (1 <<26),         /* Used to detect opt-ACK attack */
         PO_LOSS_REC = (1 <<27),         /* This structure is a loss record *//* 表示一个丢包记录 */
         /* Only one of PO_SCHED, PO_UNACKED, or PO_LOST can be set.  If pressed
@@ -175,6 +175,7 @@ typedef struct lsquic_packet_out
         POL_HEADER_PROT = 1 << 9,       /* Header protection applied */
 #endif
         POL_LIMITED     = 1 << 10,      /* Used to credit sc_next_limit if needed. */
+                                        /* 表示被sc_next_limit限制时发送, 比如RTO触发时会设置只能发送两个包 */
         POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK检测丢失 */
     }                  po_lflags:16;
     unsigned char     *po_data;

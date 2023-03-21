@@ -4756,6 +4756,7 @@ ietf_full_conn_ci_next_packet_to_send (struct lsquic_conn *lconn,
     struct lsquic_packet_out *packet_out;
     const struct conn_path *cpath;
 
+    /* 从scheduled队列获取将要发送的数据包 */
     packet_out = lsquic_send_ctl_next_packet_to_send(&conn->ifc_send_ctl,
                                                                     to_coal);
     if (packet_out)
@@ -4788,7 +4789,9 @@ ietf_full_conn_ci_next_tick_time (struct lsquic_conn *lconn, unsigned *why)
     lsquic_time_t alarm_time, pacer_time, now;
     enum alarm_id al_id;
 
+    /* 最近的定时器超时时间 */
     alarm_time = lsquic_alarmset_mintime(&conn->ifc_alset, &al_id);
+    /* 最近的pace时间 */
     pacer_time = lsquic_send_ctl_next_pacer_time(&conn->ifc_send_ctl);
 
     if (pacer_time && LSQ_LOG_ENABLED(LSQ_LOG_DEBUG))

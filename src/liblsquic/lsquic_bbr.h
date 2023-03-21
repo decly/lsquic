@@ -45,16 +45,16 @@ struct lsquic_bbr
 
     enum
     {
-        BBR_RS_NOT_IN_RECOVERY,	/* 无丢包, 丢包后会进入BBR_RS_CONSERVATION */
-        BBR_RS_CONSERVATION,	/* 保守模式, 不增加cwnd且丢包减cwnd, 持续完整一轮后进入BBR_RS_GROWTH */
-        BBR_RS_GROWTH,		/* 慢启动增加cwnd但丢包也减cwnd, 连续一轮没有丢包才会回到BBR_RS_NOT_IN_RECOVERY */
+        BBR_RS_NOT_IN_RECOVERY, /* 无丢包, 丢包后会进入BBR_RS_CONSERVATION */
+        BBR_RS_CONSERVATION,    /* 保守模式, 不增加cwnd且丢包减cwnd, 持续完整一轮后进入BBR_RS_GROWTH */
+        BBR_RS_GROWTH,          /* 慢启动增加cwnd但丢包也减cwnd, 连续一轮没有丢包才会回到BBR_RS_NOT_IN_RECOVERY */
     }                           bbr_recovery_state;	/* 快速恢复状态 */
 
     enum
     {
-        BBR_FLAG_IN_ACK                  = 1 << 0,   /* cci_begin_ack() has been called */
-        BBR_FLAG_LAST_SAMPLE_APP_LIMITED = 1 << 1,	/* ACK的最高包号有没有app limited */
-        BBR_FLAG_HAS_NON_APP_LIMITED     = 1 << 2,	/* 曾经存在没有被app limited */
+        BBR_FLAG_IN_ACK                  = 1 << 0,  /* cci_begin_ack() has been called */
+        BBR_FLAG_LAST_SAMPLE_APP_LIMITED = 1 << 1,  /* ACK的最高包号有没有app limited */
+        BBR_FLAG_HAS_NON_APP_LIMITED     = 1 << 2,  /* 曾经存在没有被app limited */
         BBR_FLAG_APP_LIMITED_SINCE_LAST_PROBE_RTT
                                          = 1 << 3,
         BBR_FLAG_PROBE_RTT_DISABLED_IF_APP_LIMITED
@@ -62,7 +62,7 @@ struct lsquic_bbr
         BBR_FLAG_PROBE_RTT_SKIPPED_IF_SIMILAR_RTT
                                          = 1 << 5,
         BBR_FLAG_EXIT_STARTUP_ON_LOSS    = 1 << 6,
-        BBR_FLAG_IS_AT_FULL_BANDWIDTH    = 1 << 7,	/* startup探测到带宽满(3轮带宽没涨25%) */
+        BBR_FLAG_IS_AT_FULL_BANDWIDTH    = 1 << 7,  /* startup探测到带宽满(3轮带宽没涨25%) */
         BBR_FLAG_EXITING_QUIESCENCE      = 1 << 8,
         BBR_FLAG_PROBE_RTT_ROUND_PASSED  = 1 << 9,
         BBR_FLAG_FLEXIBLE_APP_LIMITED    = 1 << 10,
@@ -75,7 +75,7 @@ struct lsquic_bbr
                                          = 1 << 12,
         // If true, use a CWND of 0.75*BDP during probe_rtt instead of 4
         // packets.
-        BBR_FLAG_PROBE_RTT_BASED_ON_BDP  = 1 << 13,	/* 设置后probe_rtt模式inflight降为0.75*BDP, 而不是4个包 */
+        BBR_FLAG_PROBE_RTT_BASED_ON_BDP  = 1 << 13, /* 设置后probe_rtt模式inflight降为0.75*BDP, 而不是4个包 */
         // When true, pace at 1.5x and disable packet conservation in STARTUP.
         BBR_FLAG_SLOWER_STARTUP          = 1 << 14,
         // When true, add the most recent ack aggregation measurement during STARTUP.
@@ -87,12 +87,12 @@ struct lsquic_bbr
 
     // Number of round-trips in PROBE_BW mode, used for determining the current
     // pacing gain cycle.
-    unsigned                    bbr_cycle_current_offset;	/* probe_bw周期的pacing_gain索引 */
+    unsigned                    bbr_cycle_current_offset;   /* probe_bw周期的pacing_gain索引 */
 
     const struct lsquic_rtt_stats
                                *bbr_rtt_stats;
 
-    struct bw_sampler           bbr_bw_sampler;	/* 用于收发包时的带宽等各种统计 */
+    struct bw_sampler           bbr_bw_sampler; /* 用于收发包时的带宽等各种统计 */
 
     /*
      " BBR.BtlBwFilter: The max filter used to estimate BBR.BtlBw.
@@ -115,7 +115,7 @@ struct lsquic_bbr
     lsquic_time_t               bbr_aggregation_epoch_start_time;
     uint64_t                    bbr_aggregation_epoch_bytes;
 
-    lsquic_packno_t             bbr_last_sent_packno;	/* 最新发送的包号 */
+    lsquic_packno_t             bbr_last_sent_packno;   /* 最新发送的包号 */
     lsquic_packno_t             bbr_current_round_trip_end;
 
     // Receiving acknowledgement of a packet after |bbr_end_recovery_at| will

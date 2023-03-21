@@ -63,6 +63,7 @@ struct cong_ctl_if
     (*cci_lost) (void *cong_ctl, struct lsquic_packet_out *,
                                                         unsigned packet_sz);
 
+    /* RTO触发时被调用 */
     void
     (*cci_timeout) (void *cong_ctl);
 

@@ -81,7 +81,7 @@
 
 enum retx_mode {
     RETX_MODE_HANDSHAKE,
-    RETX_MODE_LOSS,
+    RETX_MODE_LOSS, /* 早重传 */
     RETX_MODE_TLP,
     RETX_MODE_RTO,
 };
@@ -178,6 +178,7 @@ lsquic_send_ctl_have_unacked_stream_frames (const lsquic_send_ctl_t *ctl)
 }
 
 
+/* 返回unack队列首个未被确认的包(不包括丢包记录) */
 static lsquic_packet_out_t *
 send_ctl_first_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
                                                         enum packnum_space pns)
@@ -201,6 +202,7 @@ lsquic_send_ctl_have_unacked_retx_data (const struct lsquic_send_ctl *ctl)
 }
 
 
+/* 返回unack队列最后一个未被确认的包(不包括丢包记录) */
 static lsquic_packet_out_t *
 send_ctl_last_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
                                                     enum packnum_space pns)
@@ -229,20 +231,24 @@ have_unacked_handshake_packets (const lsquic_send_ctl_t *ctl)
 }
 
 
+/* 返回定时器当前类型 */
 static enum retx_mode
 get_retx_mode (const lsquic_send_ctl_t *ctl)
 {
+    /* 按照优先级判断: 1.握手重传, 2.早重传, 3.tlp, 4.RTO */
+
     if (!(ctl->sc_conn_pub->lconn->cn_flags & LSCONN_HANDSHAKE_DONE)
                                     && have_unacked_handshake_packets(ctl))
         return RETX_MODE_HANDSHAKE;
-    if (ctl->sc_loss_to)
+    if (ctl->sc_loss_to) /* 早重传 */
         return RETX_MODE_LOSS;
-    if (ctl->sc_n_tlp < 2)
+    if (ctl->sc_n_tlp < 2) /* TLP可以连续发送2个 */
         return RETX_MODE_TLP;
-    return RETX_MODE_RTO;
+    return RETX_MODE_RTO; /* 最后是RTO */
 }
 
 
+/* 返回RTO时间 */
 static lsquic_time_t
 get_retx_delay (const struct lsquic_rtt_stats *rtt_stats)
 {
@@ -256,12 +262,13 @@ get_retx_delay (const struct lsquic_rtt_stats *rtt_stats)
             delay = MIN_RTO_DELAY;
     }
     else
-        delay = DEFAULT_RETX_DELAY;
+        delay = DEFAULT_RETX_DELAY; /* 默认500ms */
 
     return delay;
 }
 
 
+/* 定时器超时触发函数 */
 static void
 retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_time_t now)
 {
@@ -285,25 +292,26 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
         send_ctl_expire(ctl, pns, EXFI_HSK);
         /* Do not register cubic loss during handshake */
         break;
-    case RETX_MODE_LOSS:
+    case RETX_MODE_LOSS: /* 早重传触发, 检测是否丢包 */
         send_ctl_detect_losses(ctl, pns, now);
         break;
-    case RETX_MODE_TLP:
+    case RETX_MODE_TLP: /* TLP */
         ++ctl->sc_n_tlp;
-        send_ctl_expire(ctl, pns, EXFI_LAST);
+        send_ctl_expire(ctl, pns, EXFI_LAST); /* 重传unack队列最后一个数据包 */
         break;
-    case RETX_MODE_RTO:
+    case RETX_MODE_RTO: /* RTO */
         ctl->sc_last_rto_time = now;
-        ++ctl->sc_n_consec_rtos;
-        ctl->sc_next_limit = 2;
+        ++ctl->sc_n_consec_rtos; /* 增加RTO指数退避 */
+        ctl->sc_next_limit = 2; /* RTO发送两个数据包 */
         LSQ_DEBUG("packet RTO is %"PRIu64" usec", expiry);
-        send_ctl_expire(ctl, pns, EXFI_ALL);
+        send_ctl_expire(ctl, pns, EXFI_ALL); /* 标记unack队列所有包丢失 */
         ctl->sc_ci->cci_timeout(CGP(ctl));
         if (lconn->cn_if->ci_retx_timeout)
             lconn->cn_if->ci_retx_timeout(lconn);
         break;
     }
 
+    /* 如果存在未被确认的包那么继续触发重传定时器 */
     packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
     if (packet_out)
         set_retx_alarm(ctl, pns, now);
@@ -428,19 +436,19 @@ lsquic_send_ctl_init (lsquic_send_ctl_t *ctl, struct lsquic_alarmset *alset,
 #endif
 }
 
-
+/* 获取指数退避的RTO时间 */
 static lsquic_time_t
 calculate_packet_rto (lsquic_send_ctl_t *ctl)
 {
     lsquic_time_t delay;
 
-    delay = get_retx_delay(&ctl->sc_conn_pub->rtt_stats);
+    delay = get_retx_delay(&ctl->sc_conn_pub->rtt_stats); /* RTO时间 */
 
-    unsigned exp = ctl->sc_n_consec_rtos;
+    unsigned exp = ctl->sc_n_consec_rtos; /* 指数退避 */
     if (exp > MAX_RTO_BACKOFFS)
         exp = MAX_RTO_BACKOFFS;
 
-    delay = delay * (1 << exp);
+    delay = delay * (1 << exp); /* 指数退避后的RTO */
 
     return delay;
 }
@@ -454,12 +462,14 @@ calculate_tlp_delay (lsquic_send_ctl_t *ctl)
     srtt = lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats);
     if (ctl->sc_n_in_flight_all > 1)
     {
+        /* 正常情况TLP超时时间为 max(2*srtt, 10ms) */
         delay = 10000;  /* 10 ms is the minimum tail loss probe delay */
         if (delay < 2 * srtt)
             delay = 2 * srtt;
     }
     else
     {
+        /* inflight为1时, TLP超时时间为max(2*srtt, 1.5*srtt + 25ms) */
         delay = srtt + srtt / 2 + ctl->sc_conn_pub->max_peer_ack_usec;
         if (delay < 2 * srtt)
             delay = 2 * srtt;
@@ -469,6 +479,7 @@ calculate_tlp_delay (lsquic_send_ctl_t *ctl)
 }
 
 
+/* 设置各类定时器超时时间, 比如TLP, RTO */
 static void
 set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                                                             lsquic_time_t now)
@@ -500,13 +511,13 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         delay <<= ctl->sc_n_hsk;
         ++ctl->sc_n_hsk;
         break;
-    case RETX_MODE_LOSS:
-        delay = ctl->sc_loss_to;
+    case RETX_MODE_LOSS: /* 早重传 */
+        delay = ctl->sc_loss_to; /* 在send_ctl_detect_losses中检测到早重传置为srtt/4 */
         break;
-    case RETX_MODE_TLP:
-        delay = calculate_tlp_delay(ctl);
+    case RETX_MODE_TLP: /* TLP */
+        delay = calculate_tlp_delay(ctl); /* TLP定时器时间为max(2*srtt, 10ms) */
         break;
-    default:
+    default: /* RTO */
         assert(rm == RETX_MODE_RTO);
         /* XXX the comment below as well as the name of the function
          * that follows seem obsolete.
@@ -514,15 +525,18 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         /* Base RTO on the first unacked packet, following reference
          * implementation.
          */
-        delay = calculate_packet_rto(ctl);
+        /* 因为TLP优先级较高, 所以RTO是在TLP两次的基础上超时 */
+        delay = calculate_packet_rto(ctl); /* RTO时间 */
         break;
     }
 
+    /* 最大时间60秒 */
     if (delay > MAX_RTO_DELAY)
         delay = MAX_RTO_DELAY;
 
     LSQ_DEBUG("set retx alarm to %"PRIu64", which is %"PRIu64
         " usec from now, mode %s", now + delay, delay, retx2str[rm]);
+    /* 设置定时器超时时间为delay */
     lsquic_alarmset_set(ctl->sc_alset, AL_RETX_INIT + pns, now + delay);
 
     if (PNS_APP == pns
@@ -629,6 +643,7 @@ send_ctl_sched_prepend (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 将数据包packet_out从scheduled队列删除 */
 static void
 send_ctl_sched_remove (struct lsquic_send_ctl *ctl,
                        struct lsquic_packet_out *packet_out)
@@ -751,6 +766,7 @@ lsquic_send_ctl_sent_packet (lsquic_send_ctl_t *ctl,
     send_ctl_unacked_append(ctl, packet_out);
     if (packet_out->po_frame_types & ctl->sc_retx_frames)
     {
+        /* 如果重传定时器没有激活则激活 */
         if (!lsquic_alarmset_is_set(ctl->sc_alset, AL_RETX_INIT + pns))
             set_retx_alarm(ctl, pns, packet_out->po_sent);
         if (ctl->sc_n_in_flight_retx == 1)
@@ -845,6 +861,11 @@ send_ctl_destroy_packet (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 重新设置未发送的包号
+ * @cur的数据包在未被发出时被删除, 那么在@cur右侧区间的所有数据包的包号都应该减1,
+ * 该函数对所有需要重新设置包号的数据包设置了PO_REPACKNO标志,
+ * 在scheduled队列发送时, lsquic_send_ctl_next_packet_to_send()识别到该标志会重新生成包号
+ */
 static void
 send_ctl_maybe_renumber_sched_to_right (struct lsquic_send_ctl *ctl,
                                         const struct lsquic_packet_out *cur)
@@ -856,7 +877,9 @@ send_ctl_maybe_renumber_sched_to_right (struct lsquic_send_ctl *ctl,
      */
     if (0 == (cur->po_flags & PO_REPACKNO))
     {
+        /* 将最新的包号置位本包号-1, 后面重新从本包号开始 */
         ctl->sc_cur_packno = cur->po_packno - 1;
+        /* 循环本数据包右侧的所有数据包标记PO_REPACKNO, 后续会重新生成包号 */
         for (packet_out = TAILQ_NEXT(cur, po_next);
                 packet_out && 0 == (packet_out->po_flags & PO_REPACKNO);
                     packet_out = TAILQ_NEXT(packet_out, po_next))
@@ -891,12 +914,13 @@ send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
         /* 对应从scheduled,unacked,lost队列中删除 */
         switch (chain_cur->po_flags & (PO_SCHED|PO_UNACKED|PO_LOST))
         {
-        case PO_SCHED:
+        case PO_SCHED: /* 在scheduled队列中 */
+            /* scheduled队列的数据包被删除了, 需要对右侧区间的数据包重置包号 */
             send_ctl_maybe_renumber_sched_to_right(ctl, chain_cur);
             send_ctl_sched_remove(ctl, chain_cur);
             break;
-        case PO_UNACKED:
-            if (chain_cur->po_flags & PO_LOSS_REC)
+        case PO_UNACKED: /* 在unacked队列中 */
+            if (chain_cur->po_flags & PO_LOSS_REC) /* 丢包记录直接移除即可 */
                 TAILQ_REMOVE(&ctl->sc_unacked_packets[pns], chain_cur, po_next);
             else
             {
@@ -904,7 +928,7 @@ send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
                 send_ctl_unacked_remove(ctl, chain_cur, packet_sz);
             }
             break;
-        case PO_LOST:
+        case PO_LOST: /* 在丢包队列中, 说明原始包被确认了实际上没丢, 也就不需要重传了 */
             TAILQ_REMOVE(&ctl->sc_lost_packets, chain_cur, po_next);
             break;
         case 0:
@@ -1045,6 +1069,7 @@ send_ctl_handle_lost_mtu_probe (struct lsquic_send_ctl *ctl,
 /* Returns true if packet was rescheduled, false otherwise.  In the latter
  * case, you should not dereference packet_out after the function returns.
  */
+/* 设置该@packet_out数据包丢失 */
 static int
 send_ctl_handle_lost_packet (struct lsquic_send_ctl *ctl,
         struct lsquic_packet_out *packet_out, struct lsquic_packet_out **next)
@@ -1143,7 +1168,7 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
             LSQ_DEBUG("loss by early retransmit detected, packet %"PRIu64,
                                                     packet_out->po_packno);
             largest_lost_packno = packet_out->po_packno;
-            ctl->sc_loss_to = /* 延迟重传时间为srtt/4 */
+            ctl->sc_loss_to = /* 延迟重传时间为srtt/4, 到期触发定时器检测丢包: retx_alarm_rings */
                 lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats) / 4;
             LSQ_DEBUG("set sc_loss_to to %"PRIu64", packet %"PRIu64,
                                     ctl->sc_loss_to, packet_out->po_packno);
@@ -1388,17 +1413,18 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
     if (do_rtt) /* 更新rtt */
     {
         take_rtt_sample(ctl, ack_recv_time, acki->lack_delta);
-        ctl->sc_n_consec_rtos = 0;
+        ctl->sc_n_consec_rtos = 0; /* 收到ACK清除RTO指数退避 */
         ctl->sc_n_hsk = 0;
-        ctl->sc_n_tlp = 0;
+        ctl->sc_n_tlp = 0; /* 清除TLP次数 */
     }
 
   detect_losses: /* 丢包检测 */
     losses_detected = send_ctl_detect_losses(ctl, pns, ack_recv_time);
+    /* 如果存在未被确认的包那么重置重传定时器 */
     if (send_ctl_first_unacked_retx_packet(ctl, pns))
         set_retx_alarm(ctl, pns, now);
     else
-    {
+    { /* 否则取消定时器 */
         LSQ_DEBUG("No retransmittable packets: clear alarm");
         lsquic_alarmset_unset(ctl->sc_alset, AL_RETX_INIT + pns);
     }
@@ -1697,20 +1723,20 @@ send_ctl_can_send (struct lsquic_send_ctl *ctl)
         ctl->sc_conn_pub->conn_cap.cc_max);
     if (ctl->sc_flags & SC_PACE) /* 使用pacing */
     {
-	/* 大于cwnd了不能发送 */
+        /* 大于cwnd了不能发送 */
         if (n_out >= ctl->sc_ci->cci_get_cwnd(CGP(ctl)))
             return 0;
-	/* 判断pacing是否可发送 */
+        /* 判断pacing是否可发送 */
         if (lsquic_pacer_can_schedule(&ctl->sc_pacer,
                                ctl->sc_n_scheduled + ctl->sc_n_in_flight_all))
             return 1;
         if (ctl->sc_flags & SC_SCHED_TICK)
         {
             ctl->sc_flags &= ~SC_SCHED_TICK;
-	    /* pacing定时器:
-	     * 先将连接加入到attq队列中, 等到lsquic_engine_process_conns被调用时,
-	     * 会取出到期的conn(通过pa_next_sched判断到期)加入到conns_tickable中
-	     */
+            /* pacing定时器:
+             * 先将连接加入到attq队列中, 等到lsquic_engine_process_conns被调用时,
+             * 会取出到期的conn(通过pa_next_sched判断到期)加入到conns_tickable中
+             */
             lsquic_engine_add_conn_to_attq(ctl->sc_enpub,
                     ctl->sc_conn_pub->lconn, lsquic_pacer_next_sched(&ctl->sc_pacer),
                     AEW_PACER);
@@ -1799,7 +1825,7 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
 
     switch (filter)
     {
-    case EXFI_ALL:
+    case EXFI_ALL: /* 重传所有包, 即标记所有包丢失 */
         n_resubmitted = 0;
         for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
                                                 packet_out; packet_out = next)
@@ -1821,11 +1847,11 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                                                                         &next);
         }
         break;
-    default:
+    default: /* 重传最后一个包 */
         assert(filter == EXFI_LAST);
-        packet_out = send_ctl_last_unacked_retx_packet(ctl, pns);
+        packet_out = send_ctl_last_unacked_retx_packet(ctl, pns); /* unack队列最后一个数据包 */
         if (packet_out)
-            n_resubmitted = send_ctl_handle_lost_packet(ctl, packet_out, NULL);
+            n_resubmitted = send_ctl_handle_lost_packet(ctl, packet_out, NULL); /* 设置丢失(将重传) */
         else
             n_resubmitted = 0;
         break;
@@ -1918,7 +1944,7 @@ lsquic_send_ctl_scheduled_one (lsquic_send_ctl_t *ctl,
     if (ctl->sc_flags & SC_PACE) /* 使用pacing */
     {
         unsigned n_out = ctl->sc_n_in_flight_retx + ctl->sc_n_scheduled;
-	/* 设置pacing下次发送时间 */
+        /* 设置pacing下次发送时间 */
         lsquic_pacer_packet_scheduled(&ctl->sc_pacer, n_out,
             send_ctl_in_recovery(ctl), send_ctl_transfer_time, ctl);
     }
@@ -2043,6 +2069,7 @@ lsquic_send_ctl_next_packet_to_send_predict (struct lsquic_send_ctl *ctl)
 }
 
 
+/* 从scheduled队列获取将要发送的数据包 */
 lsquic_packet_out_t *
 lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
                                                 const struct to_coal *to_coal)
@@ -2051,7 +2078,7 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
     size_t size;
     int dec_limit;
 
-  get_packet:
+  get_packet: /* 从scheduled队列取要发送的数据包 */
     packet_out = TAILQ_FIRST(&ctl->sc_scheduled_packets);
     if (!packet_out)
         return NULL;
@@ -2060,16 +2087,17 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
      * lsquic_send_ctl_next_packet_to_send_predict() in synch.
      */
     if (!(packet_out->po_frame_types & (1 << QUIC_FRAME_ACK))
-                                        && send_ctl_get_n_consec_rtos(ctl))
+                                        && send_ctl_get_n_consec_rtos(ctl)) /* 当前是RTO触发发包 */
     {
-        if (ctl->sc_next_limit)
+        if (ctl->sc_next_limit) /* RTO的发送额度, RTO触发时在retx_alarm_rings()中设置为2 */
             dec_limit = 1;
         else
-            return NULL;
+            return NULL; /* RTO发送完了, 直接返回不发送 */
     }
     else
-        dec_limit = 0;
+        dec_limit = 0; /* 正常情况发包, 不会被限制额度 */
 
+    /* 需要重新设置包号 */
     if (packet_out->po_flags & PO_REPACKNO)
     {
         if (packet_out->po_regen_sz < packet_out->po_data_sz
@@ -2107,9 +2135,9 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
     }
     else
         size = 0;
-    send_ctl_sched_remove(ctl, packet_out);
+    send_ctl_sched_remove(ctl, packet_out); /* 从scheduled队列移除 */
 
-    if (dec_limit)
+    if (dec_limit) /* 减RTO发送额度 */
     {
         --ctl->sc_next_limit;
         packet_out->po_lflags |= POL_LIMITED;
@@ -2402,7 +2430,7 @@ update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out)
      * implementation.
      */
     oldno = packet_out->po_packno;
-    packno = send_ctl_next_packno(ctl);
+    packno = send_ctl_next_packno(ctl); /* 新的包号 */
 
     packet_out->po_flags &= ~PO_SENT_SZ;
     assert(packet_out->po_frame_types & ~BQUIC_FRAME_REGEN_MASK);
@@ -2445,7 +2473,7 @@ lsquic_send_ctl_reschedule_packets (lsquic_send_ctl_t *ctl)
 #if LSQUIC_CONN_STATS
         ++ctl->sc_conn_pub->conn_stats->out.retx_packets;
 #endif
-        update_for_resending(ctl, packet_out);
+        update_for_resending(ctl, packet_out); /* 更新包号等 */
         lsquic_send_ctl_scheduled_one(ctl, packet_out); /* 加到scheduled待发送队列 */
     }
 
@@ -3168,7 +3196,7 @@ lsquic_send_ctl_schedule_buffered (lsquic_send_ctl_t *ctl,
         LSQ_DEBUG("Remove packet from buffered queue #%u; count: %u.  "
             "It becomes packet %"PRIu64, packet_type, packet_q->bpq_count,
             packet_out->po_packno);
-	/* 发送(加到sc_scheduled_packets队列)并设置pacing时间 */
+        /* 发送(加到sc_scheduled_packets队列)并设置pacing时间 */
         lsquic_send_ctl_scheduled_one(ctl, packet_out);
     }
 
