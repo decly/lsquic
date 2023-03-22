@@ -82,10 +82,11 @@ typedef struct lsquic_packet_out
                                          */
     struct lsquic_packet_out
                       *po_loss_chain;   /* Circular linked list */
-                                        /* 循环链表, 默认指向packet自身
-                                         * 在丢包时会将所有丢失记录链入, 然后在数据被确认时
-                                         * 就可以通过该链表来删除packet和所有丢失记录
-                                         * 详见send_ctl_destroy_chain()
+                                        /* 循环链表, 丢包时包括了对应同一个原始数据包的数据包和所有丢失记录,
+                                         * 无丢包时默认指向packet自身.
+                                         * 标记丢包时会将丢失记录链入: send_ctl_record_loss(),
+                                         * 然后在数据被确认时就可以通过该链表来删除packet和所有丢失记录
+                                         * 详见send_ctl_process_loss_chain_pkt()/send_ctl_destroy_chain()
                                          */
 
     enum quic_ft_bit   po_frame_types;  /* Bitmask of QUIC_FRAME_* */
@@ -116,7 +117,9 @@ typedef struct lsquic_packet_out
         PO_SCHED    = (1 <<14),         /* On scheduled queue *//* 表示在sc_scheduled_packets队列中 */
         PO_SENT_SZ  = (1 <<15),         /* 丢失记录设置该标记然后将包大小保存到po_sent_sz中 */
         PO_LONGHEAD = (1 <<16),
-        PO_ACKED_LOSS_CHAIN = (1<<17),
+        PO_ACKED_LOSS_CHAIN = (1<<17),  /* 表示该数据包/丢失记录对应的原始数据包已经被确认了,
+                                         * 设置该标记用于延后到处理该包号时才删除(而不是统一在po_loss_chain链表里一起删除)
+                                         */
 
 #define POIPv6_SHIFT 20
         PO_IPv6     = (1 <<20),         /* Set if pmi_allocate was passed is_ipv6=1,

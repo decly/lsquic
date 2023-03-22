@@ -306,6 +306,9 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
         send_ctl_expire(ctl, pns, EXFI_LAST); /* 重传unack队列最后一个数据包 */
         break;
     case RETX_MODE_RTO: /* RTO */
+        /* 这个条件没看懂, 但有个BUG: 当set_retx_alarm()中设置的RTO超过了MAX_RTO_DELAY,
+         * 那么if进不去, 导致sc_next_limit没被设置, 在lsquic_send_ctl_next_packet_to_send()无法发包
+         */
         if ( now - ctl->sc_last_rto_time >= calculate_packet_rto(ctl))
         {
             ctl->sc_last_rto_time = now;
@@ -897,6 +900,7 @@ send_ctl_maybe_renumber_sched_to_right (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 将@chain_cur数据包删除 */
 static void
 send_ctl_process_loss_chain_pkt (struct lsquic_send_ctl *ctl,
                         struct lsquic_packet_out *const chain_cur,
@@ -947,7 +951,7 @@ send_ctl_process_loss_chain_pkt (struct lsquic_send_ctl *ctl,
         lsquic_packet_out_ack_streams(chain_cur);
     LSQ_DEBUG("loss chain, destroy %s packet #%"PRIu64, state,
                 chain_cur->po_packno);
-    send_ctl_destroy_packet(ctl, chain_cur);
+    send_ctl_destroy_packet(ctl, chain_cur); /* 删除数据包 */
 }
 
 
@@ -960,21 +964,28 @@ send_ctl_acked_loss_chain (struct lsquic_send_ctl *ctl,
     struct lsquic_packet_out *chain_cur, *chain_next;
     unsigned count;
     count = 0;
+    /* 遍历po_loss_chain循环链表上的packet(不包括自己) */
     for (chain_cur = packet_out->po_loss_chain; chain_cur != packet_out;
                                                     chain_cur = chain_next)
     {
         chain_next = chain_cur->po_loss_chain;
-        if (chain_cur->po_packno > packet_out->po_packno
-            && chain_cur->po_packno <= largest_acked
-            && (chain_cur->po_flags & PO_LOST) == 0)
+        /* 当一个ack确认了多个对应同一原始数据包的数据包/丢包记录,
+         * 由于lsquic_send_ctl_got_ack()中是按照unacked队列(包号从小到大)处理的,
+         * 那么需要避免处理到这些数据包的第一个时就全部删除掉, 否则后面的数据包就
+         * 错过了确认的处理过程, 所以这里标记了PO_ACKED_LOSS_CHAIN并跳过删除过程,
+         * 延迟到lsquic_send_ctl_got_ack()处理到该包号时才会被删除.
+         */
+        if (chain_cur->po_packno > packet_out->po_packno /* 包号在当前packet之后 */
+            && chain_cur->po_packno <= largest_acked /* 包号在ack确认的范围内 */
+            && (chain_cur->po_flags & PO_LOST) == 0) /* 没在lost队列中(即在unacked队列中, 因为被ack确认了不可能在schedule队列里) */
         {
             chain_cur->po_flags |= PO_ACKED_LOSS_CHAIN;
             continue;
         }
-        send_ctl_process_loss_chain_pkt(ctl, chain_cur, next);
+        send_ctl_process_loss_chain_pkt(ctl, chain_cur, next); /* 删除数据包 */
         ++count;
     }
-    packet_out->po_loss_chain = packet_out;
+    packet_out->po_loss_chain = packet_out; /* 恢复默认指向自己(删除po_loss_chain队列) */ 
 
     if (count)
         LSQ_DEBUG("destroyed %u packet%.*s in chain of packet #%"PRIu64,
@@ -1454,19 +1465,26 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
             }
             ack2ed[!!(packet_out->po_frame_types & (1 << QUIC_FRAME_ACK))]
                 = packet_out->po_ack2ed;
-            /* 确认的最后一个包才需要更新rtt, 否则rtt会偏大 */
+            /* 只有确认最高包号才能更新rtt
+             * 因为客户端的携带的delay是根据当前最大接收到的包号计算的,
+             * 所以对其他包号来说是不准确的
+             */
             do_rtt |= packet_out->po_packno == largest_acked(acki);
 	        /* 调用拥塞算法的cci_ack接口 */
             ctl->sc_ci->cci_ack(CGP(ctl), packet_out, packet_sz, now,
                                                              app_limited);
-            /* 删除po_loss_chain循环链表上的所有packet和丢失记录,
-             * 当数据包或丢失记录被确认时会删除所有关联的数据包和丢失记录
+            /* 删除packet关联在po_loss_chain队列上的数据包和丢失记录(对应同一原始数据包),
+             * 当数据包或丢失记录被确认时会删除所有关联的数据包和丢失记录.
+             * 如果标记PO_ACKED_LOSS_CHAIN说明该po_loss_chain已经被处理过且需要延后删除
              */
             if (!(packet_out->po_flags & PO_ACKED_LOSS_CHAIN))
                 send_ctl_acked_loss_chain(ctl, packet_out, &next,
                                           largest_acked(acki));
             send_ctl_destroy_packet(ctl, packet_out); /* 删除被确认的包 */
         }
+        /* 标记了PO_ACKED_LOSS_CHAIN(说明之前标记了延后删除)
+         * 并且包号已经小于要处理的ack range范围, 那么就可以直接删除了
+         */
         else if (packet_out->po_flags & PO_ACKED_LOSS_CHAIN)
         {
             send_ctl_process_loss_chain_pkt(ctl, packet_out, &next);
@@ -1489,6 +1507,9 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
     /* 如果存在未被确认的包那么重置重传定时器 */
     if (send_ctl_first_unacked_retx_packet(ctl, pns))
     {
+        /* 这里有BUG: 设置过定时器就不会继续设置, 导致定时器会经常触发,
+         * 正常应该在确认数据包时推迟定时器
+         */
         if (!lsquic_alarmset_is_set(ctl->sc_alset, pns) && losses_detected)
             set_retx_alarm(ctl, pns, now);
     }
