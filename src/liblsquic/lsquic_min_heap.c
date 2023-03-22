@@ -43,6 +43,7 @@ heapify_min_heap (struct min_heap *heap, unsigned i)
 }
 
 
+/* 将item按照val值排序(小到大)插入堆 */
 void
 lsquic_mh_insert (struct min_heap *heap, void *item, uint64_t val)
 {
@@ -51,10 +52,12 @@ lsquic_mh_insert (struct min_heap *heap, void *item, uint64_t val)
 
     assert(heap->mh_nelem < heap->mh_nalloc);
 
+    /* 先放入堆尾 */
     heap->mh_elems[ heap->mh_nelem ].mhe_item = item;
     heap->mh_elems[ heap->mh_nelem ].mhe_val  = val;
     ++heap->mh_nelem;
 
+    /* 使用堆排序: 从下往上堆化 */
     i = heap->mh_nelem - 1;
     while (i > 0 && heap->mh_elems[ MHE_PARENT(i) ].mhe_val >
                                     heap->mh_elems[ i ].mhe_val)
@@ -75,10 +78,11 @@ lsquic_mh_pop (struct min_heap *heap)
     if (heap->mh_nelem == 0)
         return NULL;
 
-    item = heap->mh_elems[0].mhe_item;
+    item = heap->mh_elems[0].mhe_item; /* 堆顶为最小值 */
     --heap->mh_nelem;
     if (heap->mh_nelem > 0)
     {
+	/* 堆排序: 最后结点放到堆顶, 然后从上往下堆化排序 */
         heap->mh_elems[0] = heap->mh_elems[ heap->mh_nelem ];
         heapify_min_heap(heap, 0);
     }

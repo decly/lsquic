@@ -1,0 +1,12 @@
+build/
+build32/
+build64/
+*.pyc
+*.swp
+*.swo
+
+*.patch
+cscope.*
+GPATH
+GRTAGS
+GTAGS

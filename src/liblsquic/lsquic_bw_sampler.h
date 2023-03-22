@@ -31,7 +31,7 @@ struct bw_sampler
 {
     struct lsquic_conn *bws_conn;
     uint64_t            bws_total_sent,
-                        bws_total_acked,
+                        bws_total_acked,	/* 总共被确认的大小 */
                         bws_total_lost;
     /* Value of bws_total_sent at the time last ACKed packet was sent.  Only
      * valid if bws_last_acked_sent_time is valid.

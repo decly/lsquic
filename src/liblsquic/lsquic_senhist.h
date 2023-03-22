@@ -15,7 +15,7 @@
 #endif
 
 typedef struct lsquic_senhist {
-    lsquic_packno_t             sh_last_sent;
+    lsquic_packno_t             sh_last_sent;	/* 最后发送的包号 */
     lsquic_packno_t             sh_warn_thresh;
     enum {
 #if !LSQUIC_SENHIST_FATAL

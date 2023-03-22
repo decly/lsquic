@@ -73,14 +73,16 @@
 
 #define CGP(ctl) ((struct cong_ctl *) (ctl)->sc_cong_ctl)
 
+/* 包的实际长度 */
 #define packet_out_total_sz(p) \
                 lsquic_packet_out_total_sz(ctl->sc_conn_pub->lconn, p)
+/* 包长度, 与packet_out_total_sz区别是丢包记录会返回原包的长度 */
 #define packet_out_sent_sz(p) \
                 lsquic_packet_out_sent_sz(ctl->sc_conn_pub->lconn, p)
 
 enum retx_mode {
     RETX_MODE_HANDSHAKE,
-    RETX_MODE_LOSS,
+    RETX_MODE_LOSS, /* 早重传 */
     RETX_MODE_TLP,
     RETX_MODE_RTO,
 };
@@ -177,6 +179,7 @@ lsquic_send_ctl_have_unacked_stream_frames (const lsquic_send_ctl_t *ctl)
 }
 
 
+/* 返回unack队列首个未被确认的包(不包括丢包记录) */
 static lsquic_packet_out_t *
 send_ctl_first_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
                                                         enum packnum_space pns)
@@ -200,6 +203,7 @@ lsquic_send_ctl_have_unacked_retx_data (const struct lsquic_send_ctl *ctl)
 }
 
 
+/* 返回unack队列最后一个未被确认的包(不包括丢包记录) */
 static lsquic_packet_out_t *
 send_ctl_last_unacked_retx_packet (const struct lsquic_send_ctl *ctl,
                                                     enum packnum_space pns)
@@ -228,20 +232,24 @@ have_unacked_handshake_packets (const lsquic_send_ctl_t *ctl)
 }
 
 
+/* 返回定时器当前类型 */
 static enum retx_mode
 get_retx_mode (const lsquic_send_ctl_t *ctl)
 {
+    /* 按照优先级判断: 1.握手重传, 2.早重传, 3.tlp, 4.RTO */
+
     if (!(ctl->sc_conn_pub->lconn->cn_flags & LSCONN_HANDSHAKE_DONE)
                                     && have_unacked_handshake_packets(ctl))
         return RETX_MODE_HANDSHAKE;
-    if (ctl->sc_loss_to)
+    if (ctl->sc_loss_to) /* 早重传 */
         return RETX_MODE_LOSS;
-    if (ctl->sc_n_tlp < 2)
+    if (ctl->sc_n_tlp < 2) /* TLP可以连续发送2个 */
         return RETX_MODE_TLP;
-    return RETX_MODE_RTO;
+    return RETX_MODE_RTO; /* 最后是RTO */
 }
 
 
+/* 返回RTO时间 */
 static lsquic_time_t
 get_retx_delay (const struct lsquic_rtt_stats *rtt_stats)
 {
@@ -255,7 +263,7 @@ get_retx_delay (const struct lsquic_rtt_stats *rtt_stats)
             delay = MIN_RTO_DELAY;
     }
     else
-        delay = DEFAULT_RETX_DELAY;
+        delay = DEFAULT_RETX_DELAY; /* 默认500ms */
 
     return delay;
 }
@@ -265,6 +273,7 @@ static lsquic_time_t
 calculate_packet_rto (lsquic_send_ctl_t *ctl);
 
 
+/* 定时器超时触发函数 */
 static void
 retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_time_t now)
 {
@@ -288,30 +297,31 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
         send_ctl_expire(ctl, pns, EXFI_HSK);
         /* Do not register cubic loss during handshake */
         break;
-    case RETX_MODE_LOSS:
+    case RETX_MODE_LOSS: /* 早重传触发, 检测是否丢包 */
         send_ctl_detect_losses(ctl, pns, now);
         break;
-    case RETX_MODE_TLP:
+    case RETX_MODE_TLP: /* TLP */
         ctl->sc_last_rto_time = now;
         ++ctl->sc_n_tlp;
-        send_ctl_expire(ctl, pns, EXFI_LAST);
+        send_ctl_expire(ctl, pns, EXFI_LAST); /* 重传unack队列最后一个数据包 */
         break;
-    case RETX_MODE_RTO:
+    case RETX_MODE_RTO: /* RTO */
         if ( now - ctl->sc_last_rto_time >= calculate_packet_rto(ctl))
         {
             ctl->sc_last_rto_time = now;
-            ++ctl->sc_n_consec_rtos;
-            ctl->sc_next_limit = 2;
+            ++ctl->sc_n_consec_rtos; /* 增加RTO指数退避 */
+            ctl->sc_next_limit = 2; /* RTO发送两个数据包 */
             ctl->sc_ci->cci_timeout(CGP(ctl));
             if (lconn->cn_if->ci_retx_timeout)
                 lconn->cn_if->ci_retx_timeout(lconn);
         }
         LSQ_DEBUG("packet RTO is %"PRIu64" (+%"PRIu64") usec, consec RTOs: %d",
                   expiry, now - expiry, ctl->sc_n_consec_rtos);
-        send_ctl_expire(ctl, pns, EXFI_ALL);
+        send_ctl_expire(ctl, pns, EXFI_ALL); /* 标记unack队列所有包丢失 */
         break;
     }
 
+    /* 如果存在未被确认的包那么继续触发重传定时器 */
     packet_out = send_ctl_first_unacked_retx_packet(ctl, pns);
     if (packet_out)
         set_retx_alarm(ctl, pns, now);
@@ -436,19 +446,19 @@ lsquic_send_ctl_init (lsquic_send_ctl_t *ctl, struct lsquic_alarmset *alset,
 #endif
 }
 
-
+/* 获取指数退避的RTO时间 */
 static lsquic_time_t
 calculate_packet_rto (lsquic_send_ctl_t *ctl)
 {
     lsquic_time_t delay;
 
-    delay = get_retx_delay(&ctl->sc_conn_pub->rtt_stats);
+    delay = get_retx_delay(&ctl->sc_conn_pub->rtt_stats); /* RTO时间 */
 
-    unsigned exp = ctl->sc_n_consec_rtos;
+    unsigned exp = ctl->sc_n_consec_rtos; /* 指数退避 */
     if (exp > MAX_RTO_BACKOFFS)
         exp = MAX_RTO_BACKOFFS;
 
-    delay = delay * (1 << exp);
+    delay = delay * (1 << exp); /* 指数退避后的RTO */
 
     return delay;
 }
@@ -463,8 +473,10 @@ calculate_tlp_delay (lsquic_send_ctl_t *ctl)
     if (!srtt)
         srtt = INITIAL_RTT;
     if (ctl->sc_n_in_flight_all > 1)
+        /* 正常情况TLP超时时间为 max(2*srtt, 10ms) */
         delay = 10000;  /* 10 ms is the minimum tail loss probe delay */
     else
+        /* inflight为1时, TLP超时时间为max(2*srtt, 1.5*srtt + 25ms) */
         delay = srtt + srtt / 2 + ctl->sc_conn_pub->max_peer_ack_usec;
     if (delay < 2 * srtt)
         delay = 2 * srtt;
@@ -473,6 +485,7 @@ calculate_tlp_delay (lsquic_send_ctl_t *ctl)
 }
 
 
+/* 设置各类定时器超时时间, 比如TLP, RTO */
 static void
 set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                                                             lsquic_time_t now)
@@ -504,13 +517,13 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         delay <<= ctl->sc_n_hsk;
         ++ctl->sc_n_hsk;
         break;
-    case RETX_MODE_LOSS:
-        delay = ctl->sc_loss_to;
+    case RETX_MODE_LOSS: /* 早重传 */
+        delay = ctl->sc_loss_to; /* 在send_ctl_detect_losses中检测到早重传置为srtt/4 */
         break;
-    case RETX_MODE_TLP:
-        delay = calculate_tlp_delay(ctl);
+    case RETX_MODE_TLP: /* TLP */
+        delay = calculate_tlp_delay(ctl); /* TLP定时器时间为max(2*srtt, 10ms) */
         break;
-    default:
+    default: /* RTO */
         assert(rm == RETX_MODE_RTO);
         /* XXX the comment below as well as the name of the function
          * that follows seem obsolete.
@@ -518,16 +531,19 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         /* Base RTO on the first unacked packet, following reference
          * implementation.
          */
-        delay = calculate_packet_rto(ctl);
+        /* 因为TLP优先级较高, 所以RTO是在TLP两次的基础上超时 */
+        delay = calculate_packet_rto(ctl); /* RTO时间 */
         break;
     }
 
+    /* 最大时间60秒 */
     if (delay > MAX_RTO_DELAY)
         delay = MAX_RTO_DELAY;
 
     LSQ_DEBUG("set RETX_%s alarm to %"PRIu64" (%"PRIu64
         "), mode %s", lsquic_pns2str[pns],
               now + delay, delay, retx2str[rm]);
+    /* 设置定时器超时时间为delay */
     lsquic_alarmset_set(ctl->sc_alset, AL_RETX_INIT + pns, now + delay);
 
     if (PNS_APP == pns
@@ -543,6 +559,7 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
 /* XXX can we optimize this by caching the value of this function?  It should
  * not change within one tick.
  */
+/* 返回一个包的发送时间: 包大小/pacing_rate */
 static lsquic_time_t
 send_ctl_transfer_time (void *ctx)
 {
@@ -552,9 +569,11 @@ send_ctl_transfer_time (void *ctx)
     int in_recovery;
 
     in_recovery = send_ctl_in_recovery(ctl);
+    /* 获取拥塞算法pacing_rate */
     pacing_rate = ctl->sc_ci->cci_pacing_rate(CGP(ctl), in_recovery);
     if (!pacing_rate)
         pacing_rate = 1;
+    /* 一个包的发送时间(微妙) = 包大小 / pacing_rate */
     tx_time = (uint64_t) SC_PACK_SIZE(ctl) * 1000000 / pacing_rate;
     return tx_time;
 }
@@ -573,13 +592,14 @@ send_ctl_unacked_append (struct lsquic_send_ctl *ctl,
     ctl->sc_bytes_unacked_all += packet_out_sent_sz(packet_out);
     ctl->sc_n_in_flight_all  += 1;
     if (packet_out->po_frame_types & ctl->sc_retx_frames)
-    {
+    { /* 只统计需要重传的帧 */
         ctl->sc_bytes_unacked_retx += packet_out_total_sz(packet_out);
         ++ctl->sc_n_in_flight_retx;
     }
 }
 
 
+/* 将packet_out从sc_unacked_packets队列中删除 */
 static void
 send_ctl_unacked_remove (struct lsquic_send_ctl *ctl,
                      struct lsquic_packet_out *packet_out, unsigned packet_sz)
@@ -611,6 +631,7 @@ send_ctl_sched_Xpend_common (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 将packet_out包加到sc_scheduled_packets队列中 */
 static void
 send_ctl_sched_append (struct lsquic_send_ctl *ctl,
                        struct lsquic_packet_out *packet_out)
@@ -629,6 +650,7 @@ send_ctl_sched_prepend (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 将数据包packet_out从scheduled队列删除 */
 static void
 send_ctl_sched_remove (struct lsquic_send_ctl *ctl,
                        struct lsquic_packet_out *packet_out)
@@ -751,6 +773,7 @@ lsquic_send_ctl_sent_packet (lsquic_send_ctl_t *ctl,
     send_ctl_unacked_append(ctl, packet_out);
     if (packet_out->po_frame_types & ctl->sc_retx_frames)
     {
+        /* 如果重传定时器没有激活则激活 */
         if (!lsquic_alarmset_is_set(ctl->sc_alset, AL_RETX_INIT + pns))
             set_retx_alarm(ctl, pns, packet_out->po_sent);
         if (ctl->sc_n_in_flight_retx == 1)
@@ -811,12 +834,12 @@ take_rtt_sample (lsquic_send_ctl_t *ctl,
             ctl->sc_flags &= ~SC_ROUGH_RTT;
         }
         ctl->sc_max_rtt_packno = packno;
-        lsquic_rtt_stats_update(&ctl->sc_conn_pub->rtt_stats, measured_rtt, lack_delta);
+        lsquic_rtt_stats_update(&ctl->sc_conn_pub->rtt_stats, measured_rtt, lack_delta); /* 更新rtt */
         LSQ_DEBUG("packno %"PRIu64"; rtt: %"PRIu64"; delta: %"PRIu64"; "
             "new srtt: %"PRIu64, packno, measured_rtt, lack_delta,
             lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats));
         if (ctl->sc_ci == &lsquic_cong_adaptive_if)
-            send_ctl_select_cc(ctl);
+            send_ctl_select_cc(ctl); /* adaptive算法根据rtt选择使用bbr或cubic */
     }
 }
 
@@ -845,6 +868,11 @@ send_ctl_destroy_packet (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 重新设置未发送的包号
+ * @cur的数据包在未被发出时被删除, 那么在@cur右侧区间的所有数据包的包号都应该减1,
+ * 该函数对所有需要重新设置包号的数据包设置了PO_REPACKNO标志,
+ * 在scheduled队列发送时, lsquic_send_ctl_next_packet_to_send()识别到该标志会重新生成包号
+ */
 static void
 send_ctl_maybe_renumber_sched_to_right (struct lsquic_send_ctl *ctl,
                                         const struct lsquic_packet_out *cur)
@@ -856,7 +884,9 @@ send_ctl_maybe_renumber_sched_to_right (struct lsquic_send_ctl *ctl,
      */
     if (0 == (cur->po_flags & PO_REPACKNO))
     {
+        /* 将最新的包号置位本包号-1, 后面重新从本包号开始 */
         ctl->sc_cur_packno = cur->po_packno - 1;
+        /* 循环本数据包右侧的所有数据包标记PO_REPACKNO, 后续会重新生成包号 */
         for (packet_out = TAILQ_NEXT(cur, po_next);
                 packet_out && 0 == (packet_out->po_flags & PO_REPACKNO);
                     packet_out = TAILQ_NEXT(packet_out, po_next))
@@ -875,15 +905,17 @@ send_ctl_process_loss_chain_pkt (struct lsquic_send_ctl *ctl,
     unsigned packet_sz;
     const char *state;
     enum packnum_space pns;
+    /* 对应从scheduled,unacked,lost队列中删除 */
     switch (chain_cur->po_flags & (PO_SCHED|PO_UNACKED|PO_LOST))
     {
-    case PO_SCHED:
+    case PO_SCHED: /* 在scheduled队列中 */
+        /* scheduled队列的数据包被删除了, 需要对右侧区间的数据包重置包号 */
         send_ctl_maybe_renumber_sched_to_right(ctl, chain_cur);
         send_ctl_sched_remove(ctl, chain_cur);
         state = "scheduled";
         break;
-    case PO_UNACKED:
-        if (chain_cur->po_flags & PO_LOSS_REC)
+    case PO_UNACKED: /* 在unacked队列中 */
+        if (chain_cur->po_flags & PO_LOSS_REC) /* 丢包记录直接移除即可 */
         {
             pns = lsquic_packet_out_pns(chain_cur);
             TAILQ_REMOVE(&ctl->sc_unacked_packets[pns], chain_cur, po_next);
@@ -896,7 +928,7 @@ send_ctl_process_loss_chain_pkt (struct lsquic_send_ctl *ctl,
             state = "unacked";
         }
         break;
-    case PO_LOST:
+    case PO_LOST: /* 在丢包队列中, 说明原始包被确认了实际上没丢, 也就不需要重传了 */
         TAILQ_REMOVE(&ctl->sc_lost_packets, chain_cur, po_next);
         state = "lost";
         break;
@@ -955,6 +987,7 @@ send_ctl_acked_loss_chain (struct lsquic_send_ctl *ctl,
  * of the same chain.  This is not true of the lost and scheduled packet
  * queue, as the loss records are only present on the unacked queue.
  */
+/* 删除packet_out->po_loss_chain链表上的所有packet(不包括自身) */
 static void
 send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
                         struct lsquic_packet_out *const packet_out,
@@ -963,6 +996,7 @@ send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
     struct lsquic_packet_out *chain_cur, *chain_next;
     unsigned count;
     count = 0;
+    /* 遍历po_loss_chain循环链表上的packet(不包括自己)并全部删除 */
     for (chain_cur = packet_out->po_loss_chain; chain_cur != packet_out;
                                                     chain_cur = chain_next)
     {
@@ -970,7 +1004,7 @@ send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
         send_ctl_process_loss_chain_pkt(ctl, chain_cur, next);
         ++count;
     }
-    packet_out->po_loss_chain = packet_out;
+    packet_out->po_loss_chain = packet_out; /* 恢复默认指向自己 */
 
     if (count)
         LSQ_DEBUG("destroyed %u packet%.*s in chain of packet #%"PRIu64,
@@ -978,6 +1012,7 @@ send_ctl_destroy_chain (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 创建一个丢失记录并加入到unacked队列中原始包的前面 */
 static struct lsquic_packet_out *
 send_ctl_record_loss (struct lsquic_send_ctl *ctl,
                                         struct lsquic_packet_out *packet_out)
@@ -997,11 +1032,13 @@ send_ctl_record_loss (struct lsquic_send_ctl *ctl,
         loss_record->po_sent_sz = packet_out_sent_sz(packet_out);
         loss_record->po_frame_types = packet_out->po_frame_types;
         /* Insert the loss record into the chain: */
+        /* 加入丢失记录循环链表里, 被确认时就可以调用send_ctl_destroy_chain一起删除 */
         loss_record->po_loss_chain = packet_out->po_loss_chain;
         packet_out->po_loss_chain = loss_record;
         /* Place the loss record next to the lost packet we are about to
          * remove from the list:
          */
+        /* 将丢失记录放在原始包前面(后面原始包会被移除, 相当于丢失记录替换了原始包) */
         TAILQ_INSERT_BEFORE(packet_out, loss_record, po_next);
         return loss_record;
     }
@@ -1013,6 +1050,9 @@ send_ctl_record_loss (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 创建丢失记录loss_record并在sc_unacked_packets队列中替换原始包位置,
+ * 而原始包移到sc_lost_packets队列
+ */
 static struct lsquic_packet_out *
 send_ctl_handle_regular_lost_packet (struct lsquic_send_ctl *ctl,
             lsquic_packet_out_t *packet_out, struct lsquic_packet_out **next)
@@ -1034,6 +1074,7 @@ send_ctl_handle_regular_lost_packet (struct lsquic_send_ctl *ctl,
         LSQ_DEBUG("lost ACK in packet #%"PRIu64, packet_out->po_packno);
     }
 
+    /* 调用拥塞算法丢包接口 */
     if (ctl->sc_ci->cci_lost)
         ctl->sc_ci->cci_lost(CGP(ctl), packet_out, packet_sz);
 
@@ -1047,18 +1088,18 @@ send_ctl_handle_regular_lost_packet (struct lsquic_send_ctl *ctl,
         lsquic_send_ctl_disable_ecn(ctl);
     }
 
-    if (packet_out->po_frame_types & ctl->sc_retx_frames)
+    if (packet_out->po_frame_types & ctl->sc_retx_frames) /* 需要重传的数据帧类型 */
     {
         LSQ_DEBUG("lost retransmittable packet #%"PRIu64,
                                                     packet_out->po_packno);
-        loss_record = send_ctl_record_loss(ctl, packet_out);
-        send_ctl_unacked_remove(ctl, packet_out, packet_sz);
-        TAILQ_INSERT_TAIL(&ctl->sc_lost_packets, packet_out, po_next);
+        loss_record = send_ctl_record_loss(ctl, packet_out); /* 创建丢失记录并加到unacked队列中原始包的前面 */
+        send_ctl_unacked_remove(ctl, packet_out, packet_sz); /* 原始包从unacked队列删除 */
+        TAILQ_INSERT_TAIL(&ctl->sc_lost_packets, packet_out, po_next); /* 然后加到丢包队列 */
         packet_out->po_flags |= PO_LOST;
         return loss_record;
     }
     else
-    {
+    {	/* 不需要重传的帧类型, 直接删除即可 */
         LSQ_DEBUG("lost unretransmittable packet #%"PRIu64,
                                                     packet_out->po_packno);
         send_ctl_unacked_remove(ctl, packet_out, packet_sz);
@@ -1087,6 +1128,7 @@ send_ctl_handle_lost_mtu_probe (struct lsquic_send_ctl *ctl,
 /* Returns true if packet was rescheduled, false otherwise.  In the latter
  * case, you should not dereference packet_out after the function returns.
  */
+/* 设置该@packet_out数据包丢失 */
 static int
 send_ctl_handle_lost_packet (struct lsquic_send_ctl *ctl,
         struct lsquic_packet_out *packet_out, struct lsquic_packet_out **next)
@@ -1103,6 +1145,7 @@ largest_retx_packet_number (const struct lsquic_send_ctl *ctl,
                                                     enum packnum_space pns)
 {
     const lsquic_packet_out_t *packet_out;
+    /* 找到最大还未被重传的包号 */
     TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_unacked_packets[pns],
                                                 lsquic_packets_tailq, po_next)
     {
@@ -1117,9 +1160,10 @@ largest_retx_packet_number (const struct lsquic_send_ctl *ctl,
 static void
 send_ctl_loss_event (struct lsquic_send_ctl *ctl)
 {
-    ctl->sc_ci->cci_loss(CGP(ctl));
+    ctl->sc_ci->cci_loss(CGP(ctl)); /* 调用拥塞算法cci_loss接口 */
     if (ctl->sc_flags & SC_PACE)
         lsquic_pacer_loss_event(&ctl->sc_pacer);
+    /* 更新丢包开始时的发送包号 */
     ctl->sc_largest_sent_at_cutback =
                             lsquic_senhist_largest(&ctl->sc_senhist);
 }
@@ -1133,10 +1177,11 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
     struct lsquic_packet_out *packet_out, *next, *loss_record;
     lsquic_packno_t largest_retx_packno, largest_lost_packno;
 
-    largest_retx_packno = largest_retx_packet_number(ctl, pns);
+    largest_retx_packno = largest_retx_packet_number(ctl, pns); /* 最大还未被重传的包号 */
     largest_lost_packno = 0;
     ctl->sc_loss_to = 0;
 
+    /* 遍历unacked队列检测丢包 */
     for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
             packet_out && packet_out->po_packno <= ctl->sc_largest_acked_packno;
                 packet_out = next)
@@ -1146,6 +1191,7 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         if (packet_out->po_flags & (PO_LOSS_REC|PO_POISON))
             continue;
 
+        /* FACK检测丢包: 包号 + 乱序值 < 最大确认包号 */
         if (packet_out->po_packno + ctl->sc_reord_thresh <
                                                 ctl->sc_largest_acked_packno)
         {
@@ -1155,6 +1201,9 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
             if (0 == (packet_out->po_flags & PO_MTU_PROBE))
             {
                 largest_lost_packno = packet_out->po_packno;
+                /* 创建丢失记录loss_record并在sc_unacked_packets队列中替换原始包位置,
+                 * 而原始包移到sc_lost_packets队列
+                 */
                 loss_record = send_ctl_handle_regular_lost_packet(ctl,
                                                         packet_out, &next);
                 if (loss_record)
@@ -1165,6 +1214,11 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
             continue;
         }
 
+        /* 早重传检测: 最大未被重传的包号 <= 最大确认(SACK)的包号
+         * 说明目前暂时(除非有新数据写入)没有更大的包号来触发FACK重传这些包了
+         * 而上面通过FACK的检测, 说明: 最大确认包号 - 乱序值 < 包号 <= 最大确认包号
+         * 所以直接判断丢包并设置延迟重传时间sc_loss_to为srtt/4
+         */
         if (largest_retx_packno
             && (packet_out->po_frame_types & ctl->sc_retx_frames)
             && 0 == (packet_out->po_flags & PO_MTU_PROBE)
@@ -1173,14 +1227,15 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
             LSQ_DEBUG("loss by early retransmit detected, packet #%"PRIu64,
                                                     packet_out->po_packno);
             largest_lost_packno = packet_out->po_packno;
-            ctl->sc_loss_to =
+            ctl->sc_loss_to = /* 延迟重传时间为srtt/4, 到期触发定时器检测丢包: retx_alarm_rings */
                 lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats) / 4;
             LSQ_DEBUG("set sc_loss_to to %"PRIu64", packet #%"PRIu64,
                                     ctl->sc_loss_to, packet_out->po_packno);
-            (void) send_ctl_handle_lost_packet(ctl, packet_out, &next);
+            (void) send_ctl_handle_lost_packet(ctl, packet_out, &next); /* 丢包创建丢失记录 */
             continue;
         }
 
+        /* 时间探测: 发送时间在 最大确认包号发送时间 - srtt 之前的包 认为丢包 */
         if (ctl->sc_largest_acked_sent_time > packet_out->po_sent +
                     lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats))
         {
@@ -1190,16 +1245,17 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                             && 0 == (packet_out->po_flags & PO_MTU_PROBE))
                 largest_lost_packno = packet_out->po_packno;
             else { /* don't count it as a loss */; }
-            (void) send_ctl_handle_lost_packet(ctl, packet_out, &next);
+            (void) send_ctl_handle_lost_packet(ctl, packet_out, &next); /* 丢包创建丢失记录 */
             continue;
         }
     }
 
+    /* 标记丢包的包号大于之前丢包开始时发送包号, 说明开始了新一轮的丢包 */
     if (largest_lost_packno > ctl->sc_largest_sent_at_cutback)
     {
         LSQ_DEBUG("detected new loss: packet #%"PRIu64"; new lsac: "
             "%"PRIu64, largest_lost_packno, ctl->sc_largest_sent_at_cutback);
-        send_ctl_loss_event(ctl);
+        send_ctl_loss_event(ctl); /* 新一轮的丢包事件 */
     }
     else if (largest_lost_packno)
         /* Lost packets whose numbers are smaller than the largest packet
@@ -1209,6 +1265,10 @@ send_ctl_detect_losses (struct lsquic_send_ctl *ctl, enum packnum_space pns,
         LSQ_DEBUG("ignore loss of packet #%"PRIu64" smaller than lsac "
             "%"PRIu64, largest_lost_packno, ctl->sc_largest_sent_at_cutback);
 
+    /* 返回检查到新一轮的丢包事件
+     * 这里有BUG: sc_largest_sent_at_cutback在上面send_ctl_loss_event()中会被更新,
+     * 所以这里永远都返回0. 应该在上面记录这两个值的比较状态
+     */
     return largest_lost_packno > ctl->sc_largest_sent_at_cutback;
 }
 
@@ -1235,6 +1295,7 @@ send_ctl_maybe_increase_reord_thresh (struct lsquic_send_ctl *ctl,
 #if LSQUIC_DEVEL
     if (ctl->sc_flags & SC_DYN_PTHRESH)
 #endif
+    /* 如果使用了FACK, 检查是否更新乱序值 */
     if ((loss_record->po_lflags & POL_FACKED)
             && loss_record->po_packno + ctl->sc_reord_thresh
                 < prev_largest_acked)
@@ -1316,6 +1377,7 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
 
     ack2ed[1] = 0;
 
+    /* 队列首个包号大于最大range, 不需要处理未确认队列 */
     if (packet_out->po_packno > largest_acked(acki))
         goto detect_losses;
 
@@ -1329,7 +1391,7 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
     do_rtt = 0, skip_checks = 0;
     app_limited = -1;
     do
-    {
+    {	/* 循环unacked队列 */
         next = TAILQ_NEXT(packet_out, po_next);
 #if __GNUC__
         __builtin_prefetch(next);
@@ -1339,11 +1401,12 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
         /* This is faster than binary search in the normal case when the number
          * of ranges is not much larger than the number of unacked packets.
          */
-        while (UNLIKELY(range->high < packet_out->po_packno))
+        /* range是按降序排列的, 所以这里range是从后往前遍历, 相当于升序排列 */
+        while (UNLIKELY(range->high < packet_out->po_packno)) /* range小于包号, 取下一个range */
             --range;
-        if (range->low <= packet_out->po_packno)
+        if (range->low <= packet_out->po_packno) /* 包号在range中 */
         {
-            skip_checks = range == acki->ranges;
+            skip_checks = range == acki->ranges; /* 遍历到最后一个range */
             if (app_limited < 0)
                 app_limited = send_ctl_retx_bytes_out(ctl) + 3 * SC_PACK_SIZE(ctl) /* This
                     is the "maximum burst" parameter */
@@ -1356,20 +1419,21 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
             one_rtt_cnt += lsquic_packet_out_enc_level(packet_out) == ENC_LEV_APP;
             if (0 == (packet_out->po_flags
                                         & (PO_LOSS_REC|PO_POISON|PO_MTU_PROBE)))
-            {
-                packet_sz = packet_out_sent_sz(packet_out);
-                send_ctl_unacked_remove(ctl, packet_out, packet_sz);
+            { /* 普通数据包被确认 */
+                packet_sz = packet_out_sent_sz(packet_out); /* 数据大小 */
+                send_ctl_unacked_remove(ctl, packet_out, packet_sz); /* 将packet_out从sc_unacked_packets队列中删除 */
                 lsquic_packet_out_ack_streams(packet_out);
                 LSQ_DEBUG("acking via regular record #%"PRIu64,
                                                         packet_out->po_packno);
             }
-            else if (packet_out->po_flags & PO_LOSS_REC)
+            else if (packet_out->po_flags & PO_LOSS_REC) /* 丢失记录被确认 */
             {
                 packet_sz = packet_out->po_sent_sz;
                 TAILQ_REMOVE(&ctl->sc_unacked_packets[pns], packet_out,
                                                                     po_next);
                 LSQ_DEBUG("acking via loss record #%"PRIu64,
                                                         packet_out->po_packno);
+                /* 丢包被确认说明虚假重传, 检查是否更新乱序值 */
                 send_ctl_maybe_increase_reord_thresh(ctl, packet_out,
                                                             prev_largest_acked);
 #if LSQUIC_CONN_STATS
@@ -1390,40 +1454,46 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
             }
             ack2ed[!!(packet_out->po_frame_types & (1 << QUIC_FRAME_ACK))]
                 = packet_out->po_ack2ed;
+            /* 确认的最后一个包才需要更新rtt, 否则rtt会偏大 */
             do_rtt |= packet_out->po_packno == largest_acked(acki);
+	        /* 调用拥塞算法的cci_ack接口 */
             ctl->sc_ci->cci_ack(CGP(ctl), packet_out, packet_sz, now,
                                                              app_limited);
+            /* 删除po_loss_chain循环链表上的所有packet和丢失记录,
+             * 当数据包或丢失记录被确认时会删除所有关联的数据包和丢失记录
+             */
             if (!(packet_out->po_flags & PO_ACKED_LOSS_CHAIN))
                 send_ctl_acked_loss_chain(ctl, packet_out, &next,
                                           largest_acked(acki));
-            send_ctl_destroy_packet(ctl, packet_out);
+            send_ctl_destroy_packet(ctl, packet_out); /* 删除被确认的包 */
         }
         else if (packet_out->po_flags & PO_ACKED_LOSS_CHAIN)
         {
             send_ctl_process_loss_chain_pkt(ctl, packet_out, &next);
         }
-        packet_out = next;
+        packet_out = next; /* 下一个包 */
     }
     while (packet_out && packet_out->po_packno <= largest_acked(acki));
 
-    if (do_rtt)
+    if (do_rtt) /* 更新rtt */
     {
         take_rtt_sample(ctl, ack_recv_time, acki->lack_delta);
         LSQ_DEBUG("clear sc_n_consec_rtos, sc_n_hsk, sc_ntlp");
-        ctl->sc_n_consec_rtos = 0;
+        ctl->sc_n_consec_rtos = 0; /* 收到ACK清除RTO指数退避 */
         ctl->sc_n_hsk = 0;
-        ctl->sc_n_tlp = 0;
+        ctl->sc_n_tlp = 0; /* 清除TLP次数 */
     }
 
-  detect_losses:
+  detect_losses: /* 丢包检测 */
     losses_detected = send_ctl_detect_losses(ctl, pns, ack_recv_time);
+    /* 如果存在未被确认的包那么重置重传定时器 */
     if (send_ctl_first_unacked_retx_packet(ctl, pns))
     {
         if (!lsquic_alarmset_is_set(ctl->sc_alset, pns) && losses_detected)
             set_retx_alarm(ctl, pns, now);
     }
     else
-    {
+    { /* 否则取消定时器 */
         LSQ_DEBUG("No retransmittable packets: clear alarm");
         lsquic_alarmset_unset(ctl->sc_alset, AL_RETX_INIT + pns);
     }
@@ -1556,12 +1626,14 @@ send_ctl_next_lost (lsquic_send_ctl_t *ctl)
             }
         }
 
+        /* 判断cwnd和pacing是否可发送 */
         if (!lsquic_send_ctl_can_send(ctl))
             return NULL;
 
         if (packet_out_total_sz(lost_packet) <= SC_PACK_SIZE(ctl))
         {
   pop_lost_packet:
+            /* 确定重传这个包, 从sc_lost_packets队列中删除 */
             TAILQ_REMOVE(&ctl->sc_lost_packets, lost_packet, po_next);
             lost_packet->po_flags &= ~PO_LOST;
             lost_packet->po_flags |= PO_RETX;
@@ -1718,23 +1790,29 @@ send_ctl_can_send (struct lsquic_send_ctl *ctl)
         ctl->sc_ci->cci_get_cwnd(CGP(ctl)),
         ctl->sc_conn_pub->conn_cap.cc_sent,
         ctl->sc_conn_pub->conn_cap.cc_max);
-    if (ctl->sc_flags & SC_PACE)
+    if (ctl->sc_flags & SC_PACE) /* 使用pacing */
     {
+        /* 大于cwnd了不能发送 */
         if (n_out >= ctl->sc_ci->cci_get_cwnd(CGP(ctl)))
             return 0;
+        /* 判断pacing是否可发送 */
         if (lsquic_pacer_can_schedule(&ctl->sc_pacer,
                                ctl->sc_n_scheduled + ctl->sc_n_in_flight_all))
             return 1;
         if (ctl->sc_flags & SC_SCHED_TICK)
         {
             ctl->sc_flags &= ~SC_SCHED_TICK;
+            /* pacing定时器:
+             * 先将连接加入到attq队列中, 等到lsquic_engine_process_conns被调用时,
+             * 会取出到期的conn(通过pa_next_sched判断到期)加入到conns_tickable中
+             */
             lsquic_engine_add_conn_to_attq(ctl->sc_enpub,
                     ctl->sc_conn_pub->lconn, lsquic_pacer_next_sched(&ctl->sc_pacer),
                     AEW_PACER);
         }
         return 0;
     }
-    else
+    else /* 没使用pacing, 小于cwnd即可发送 */
         return n_out < ctl->sc_ci->cci_get_cwnd(CGP(ctl));
 }
 
@@ -1766,7 +1844,7 @@ __attribute__((weak))
 int
 lsquic_send_ctl_can_send (struct lsquic_send_ctl *ctl)
 {
-    return ctl->sc_can_send(ctl);
+    return ctl->sc_can_send(ctl); /* 调用send_ctl_can_send */
 }
 
 
@@ -1816,7 +1894,7 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
 
     switch (filter)
     {
-    case EXFI_ALL:
+    case EXFI_ALL: /* 重传所有包, 即标记所有包丢失 */
         n_resubmitted = 0;
         for (packet_out = TAILQ_FIRST(&ctl->sc_unacked_packets[pns]);
                                                 packet_out; packet_out = next)
@@ -1838,11 +1916,11 @@ send_ctl_expire (struct lsquic_send_ctl *ctl, enum packnum_space pns,
                                                                         &next);
         }
         break;
-    default:
+    default: /* 重传最后一个包 */
         assert(filter == EXFI_LAST);
-        packet_out = send_ctl_last_unacked_retx_packet(ctl, pns);
+        packet_out = send_ctl_last_unacked_retx_packet(ctl, pns); /* unack队列最后一个数据包 */
         if (packet_out)
-            n_resubmitted = send_ctl_handle_lost_packet(ctl, packet_out, NULL);
+            n_resubmitted = send_ctl_handle_lost_packet(ctl, packet_out, NULL); /* 设置丢失(将重传) */
         else
             n_resubmitted = 0;
         break;
@@ -1868,6 +1946,9 @@ lsquic_send_ctl_expire_all (lsquic_send_ctl_t *ctl)
 
 
 #ifndef NDEBUG
+/* 统计sc_unacked_packets和sc_scheduled_packets队列中的包个数,
+ * 检查lsquic_send_ctl中的变量能不能对上
+ */
 void
 lsquic_send_ctl_do_sanity_check (const struct lsquic_send_ctl *ctl)
 {
@@ -1929,13 +2010,14 @@ lsquic_send_ctl_scheduled_one (lsquic_send_ctl_t *ctl,
         assert((last->po_flags & PO_REPACKNO) ||
                 last->po_packno < packet_out->po_packno);
 #endif
-    if (ctl->sc_flags & SC_PACE)
+    if (ctl->sc_flags & SC_PACE) /* 使用pacing */
     {
         unsigned n_out = ctl->sc_n_in_flight_retx + ctl->sc_n_scheduled;
+        /* 设置pacing下次发送时间 */
         lsquic_pacer_packet_scheduled(&ctl->sc_pacer, n_out,
             send_ctl_in_recovery(ctl), send_ctl_transfer_time, ctl);
     }
-    send_ctl_sched_append(ctl, packet_out);
+    send_ctl_sched_append(ctl, packet_out); /* 加到sc_scheduled_packets队列中 */
 }
 
 
@@ -2057,6 +2139,7 @@ lsquic_send_ctl_next_packet_to_send_predict (struct lsquic_send_ctl *ctl)
 }
 
 
+/* 从scheduled队列获取将要发送的数据包 */
 lsquic_packet_out_t *
 lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
                                                 const struct to_coal *to_coal)
@@ -2065,7 +2148,7 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
     size_t size;
     int dec_limit;
 
-  get_packet:
+  get_packet: /* 从scheduled队列取要发送的数据包 */
     packet_out = TAILQ_FIRST(&ctl->sc_scheduled_packets);
     if (!packet_out)
     {
@@ -2078,20 +2161,21 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
      */
     if (!(packet_out->po_frame_types
                 & ((1 << QUIC_FRAME_ACK) | (1 << QUIC_FRAME_CRYPTO)))
-            && send_ctl_get_n_consec_rtos(ctl))
+            && send_ctl_get_n_consec_rtos(ctl)) /* 当前是RTO触发发包 */
     {
-        if (ctl->sc_next_limit)
+        if (ctl->sc_next_limit) /* RTO的发送额度, RTO触发时在retx_alarm_rings()中设置为2 */
             dec_limit = 1;
         else
         {
             LSQ_DEBUG("sc_n_consec_rtos: %d, sc_next_limit is 0",
                       ctl->sc_n_consec_rtos);
-            return NULL;
+            return NULL; /* RTO发送完了, 直接返回不发送 */
         }
     }
     else
-        dec_limit = 0;
+        dec_limit = 0; /* 正常情况发包, 不会被限制额度 */
 
+    /* 需要重新设置包号 */
     if (packet_out->po_flags & PO_REPACKNO)
     {
         if (packet_out->po_regen_sz < packet_out->po_data_sz
@@ -2129,9 +2213,9 @@ lsquic_send_ctl_next_packet_to_send (struct lsquic_send_ctl *ctl,
     }
     else
         size = 0;
-    send_ctl_sched_remove(ctl, packet_out);
+    send_ctl_sched_remove(ctl, packet_out); /* 从scheduled队列移除 */
 
-    if (dec_limit)
+    if (dec_limit) /* 减RTO发送额度 */
     {
         --ctl->sc_next_limit;
         packet_out->po_lflags |= POL_LIMITED;
@@ -2424,7 +2508,7 @@ update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out)
      * implementation.
      */
     oldno = packet_out->po_packno;
-    packno = send_ctl_next_packno(ctl);
+    packno = send_ctl_next_packno(ctl); /* 新的包号 */
 
     packet_out->po_flags &= ~PO_SENT_SZ;
     assert(packet_out->po_frame_types & ~BQUIC_FRAME_REGEN_MASK);
@@ -2450,27 +2534,29 @@ update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out)
 }
 
 
+/* 重传丢失的包 */
 unsigned
 lsquic_send_ctl_reschedule_packets (lsquic_send_ctl_t *ctl)
 {
     lsquic_packet_out_t *packet_out;
     unsigned n = 0;
 
-    while ((packet_out = send_ctl_next_lost(ctl)))
+    /* 循环丢包队列的包然后重传 */
+    while ((packet_out = send_ctl_next_lost(ctl))) /* 获取丢包队列中的包 */
     {
         assert(packet_out->po_regen_sz < packet_out->po_data_sz);
         ++n;
 #if LSQUIC_CONN_STATS
         ++ctl->sc_conn_pub->conn_stats->out.retx_packets;
 #endif
-        update_for_resending(ctl, packet_out);
-        lsquic_send_ctl_scheduled_one(ctl, packet_out);
+        update_for_resending(ctl, packet_out); /* 更新包号等 */
+        lsquic_send_ctl_scheduled_one(ctl, packet_out); /* 加到scheduled待发送队列 */
     }
 
     if (n)
         LSQ_DEBUG("rescheduled %u packets", n);
 
-    return n;
+    return n; /* 返回重传的个数 */
 }
 
 
@@ -3130,6 +3216,7 @@ split_buffered_packet (lsquic_send_ctl_t *ctl,
 }
 
 
+/* 发送新数据 */
 int
 lsquic_send_ctl_schedule_buffered (lsquic_send_ctl_t *ctl,
                                             enum buf_packet_type packet_type)
@@ -3145,7 +3232,7 @@ lsquic_send_ctl_schedule_buffered (lsquic_send_ctl_t *ctl,
     const unsigned need = pf->pf_packno_bits2len(bits);
 
     while ((packet_out = TAILQ_FIRST(&packet_q->bpq_packets)) &&
-                                            lsquic_send_ctl_can_send(ctl))
+                                            lsquic_send_ctl_can_send(ctl)) /* 判断cwnd和pacing是否可发送 */
     {
         if ((packet_out->po_frame_types & QUIC_FTBIT_ACK)
                             && packet_out->po_ack2ed < ctl->sc_largest_acked)
@@ -3179,12 +3266,13 @@ lsquic_send_ctl_schedule_buffered (lsquic_send_ctl_t *ctl,
                     return -1;
             }
         }
-        TAILQ_REMOVE(&packet_q->bpq_packets, packet_out, po_next);
+        TAILQ_REMOVE(&packet_q->bpq_packets, packet_out, po_next); /* 从发送buffer中删除 */
         --packet_q->bpq_count;
-        packet_out->po_packno = send_ctl_next_packno(ctl);
+        packet_out->po_packno = send_ctl_next_packno(ctl); /* 设置包号 */
         LSQ_DEBUG("Remove packet from buffered queue #%u; count: %u.  "
             "It becomes packet #%"PRIu64, packet_type, packet_q->bpq_count,
             packet_out->po_packno);
+        /* 发送(加到sc_scheduled_packets队列)并设置pacing时间 */
         lsquic_send_ctl_scheduled_one(ctl, packet_out);
     }
 

@@ -22,6 +22,7 @@ void
 lsquic_rtt_stats_update (struct lsquic_rtt_stats *stats,
                          lsquic_time_t send_delta, lsquic_time_t lack_delta)
 {
+    /* rtt不包括对端处理时延 */
     if (send_delta > lack_delta)
         send_delta -= lack_delta;
     if (stats->srtt) {

@@ -123,7 +123,7 @@ enum ifull_conn_flags
     IFC_RECV_CLOSE    = 1 << 9,  /* Received CONNECTION_CLOSE frame */
     IFC_TICK_CLOSE    = 1 << 10,  /* We returned TICK_CLOSE */
     IFC_CREATED_OK    = 1 << 11,
-    IFC_HAVE_SAVED_ACK= 1 << 12,
+    IFC_HAVE_SAVED_ACK= 1 << 12, /* 表示缓存了ACK信息等待tick处理 */
     IFC_ABORT_COMPLAINED
                       = 1 << 13,
     IFC_DCID_SET      = 1 << 14,
@@ -439,7 +439,7 @@ struct ietf_full_conn
     STAILQ_HEAD(, stream_id_to_ss)
                                 ifc_stream_ids_to_ss;
     lsquic_time_t               ifc_created;
-    lsquic_time_t               ifc_saved_ack_received;
+    lsquic_time_t               ifc_saved_ack_received;     /* ifc_ack缓存里最新的ACK的接收时间 */
     lsquic_packno_t             ifc_max_ack_packno[N_PNS];
     lsquic_packno_t             ifc_max_non_probing;
     struct {
@@ -528,7 +528,9 @@ struct ietf_full_conn
     struct conn_stats           ifc_stats,
                                *ifc_last_stats;
 #endif
-    struct ack_info             ifc_ack;
+    struct ack_info             ifc_ack;    /* 用来接收ack帧时缓存ack信息,
+                                             * 用来合并ack然后等tick里一起处理
+                                             */
 };
 
 #define CUR_CPATH(conn_) (&(conn_)->ifc_paths[(conn_)->ifc_cur_path_id])
@@ -4863,6 +4865,7 @@ ietf_full_conn_ci_next_packet_to_send (struct lsquic_conn *lconn,
     struct lsquic_packet_out *packet_out;
     const struct conn_path *cpath;
 
+    /* 从scheduled队列获取将要发送的数据包 */
     packet_out = lsquic_send_ctl_next_packet_to_send(&conn->ifc_send_ctl,
                                                                     to_coal);
     if (packet_out)
@@ -4895,7 +4898,9 @@ ietf_full_conn_ci_next_tick_time (struct lsquic_conn *lconn, unsigned *why)
     lsquic_time_t alarm_time, pacer_time, now;
     enum alarm_id al_id;
 
+    /* 最近的定时器超时时间 */
     alarm_time = lsquic_alarmset_mintime(&conn->ifc_alset, &al_id);
+    /* 最近的pace时间 */
     pacer_time = lsquic_send_ctl_next_pacer_time(&conn->ifc_send_ctl);
 
     if (pacer_time && LSQ_LOG_ENABLED(LSQ_LOG_DEBUG))
@@ -5967,9 +5972,10 @@ process_ack_frame (struct ietf_full_conn *conn,
 
     if (conn->ifc_flags & IFC_HAVE_SAVED_ACK)
         new_acki = conn->ifc_pub.mm->acki;
-    else
+    else /* 还未缓存ACK */
         new_acki = &conn->ifc_ack;
 
+    /* 解析ACK帧, 信息存入new_acki中 */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_ack_frame(p, len, new_acki,
                                                         conn->ifc_cfg.ack_exp);
     if (parsed_len < 0)
@@ -6003,13 +6009,13 @@ process_ack_frame (struct ietf_full_conn *conn,
 
     /* Only cache ACKs for PNS_APP */
     if (pns == PNS_APP && new_acki == &conn->ifc_ack)
-    {
+    { /* 当前还没保存缓存的ACK帧, 设置缓存标志和记录收到ACK的时间, 等tick里处理 */
         LSQ_DEBUG("Saved ACK");
         conn->ifc_flags |= IFC_HAVE_SAVED_ACK;
         conn->ifc_saved_ack_received = packet_in->pi_received;
     }
-    else if (pns == PNS_APP)
-    {
+    else if (pns == PNS_APP) /* PNS_APP 且 已经有缓存ACK了 */
+    {   /* 尝试与conn->ifc_ack里缓存的合并ACK, 合并成功等tick里一起处理 */
         if (0 == lsquic_merge_acks(&conn->ifc_ack, new_acki))
         {
             CONN_STATS(in.n_acks_merged, 1);
@@ -6017,15 +6023,15 @@ process_ack_frame (struct ietf_full_conn *conn,
                 (lsquic_acki2str(&conn->ifc_ack, conn->ifc_pub.mm->ack_str,
                                 MAX_ACKI_STR_SZ), conn->ifc_pub.mm->ack_str));
         }
-        else
+        else /* ACK合并失败, 先处理掉上次缓存的ACK, 然后缓存当前新的 */
         {
             LSQ_DEBUG("could not merge new ACK into saved ACK");
             if (0 != process_ack(conn, &conn->ifc_ack, packet_in->pi_received,
                                                         packet_in->pi_received))
                 goto err;
-            conn->ifc_ack = *new_acki;
+            conn->ifc_ack = *new_acki; /* 保存新的当前ACK */
         }
-        conn->ifc_saved_ack_received = packet_in->pi_received;
+        conn->ifc_saved_ack_received = packet_in->pi_received; /* 接收时间为最新的ACK */
     }
     else
     {
@@ -8382,6 +8388,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
 
     CLOSE_IF_NECESSARY();
 
+    /* 如果有缓存的ack则处理(process_ack_frame()里会将ack信息缓存起来) */
     if (conn->ifc_flags & IFC_HAVE_SAVED_ACK)
     {
         (void) /* If there is an error, we'll fail shortly */
@@ -8395,6 +8402,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     lsquic_send_ctl_set_buffer_stream_packets(&conn->ifc_send_ctl, 1);
     CLOSE_IF_NECESSARY();
 
+    /* 定时器处理 */
     lsquic_alarmset_ring_expired(&conn->ifc_alset, now);
     CLOSE_IF_NECESSARY();
 
@@ -8479,6 +8487,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     if (conn->ifc_mflags & MF_CHECK_MTU_PROBE)
         check_or_schedule_mtu_probe(conn, now);
 
+    /* 重传丢包 */
     n = lsquic_send_ctl_reschedule_packets(&conn->ifc_send_ctl);
     if (n > 0)
         CLOSE_IF_NECESSARY();
@@ -8514,6 +8523,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
 
     maybe_conn_flush_special_streams(conn);
 
+    /* 发送数据 */
     s = lsquic_send_ctl_schedule_buffered(&conn->ifc_send_ctl, BPT_HIGHEST_PRIO);
     conn->ifc_flags |= (s < 0) << IFC_BIT_ERROR;
     if (!write_is_possible(conn))

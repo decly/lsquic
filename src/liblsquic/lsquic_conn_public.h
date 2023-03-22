@@ -31,7 +31,7 @@ struct lsquic_conn_public {
     struct lsquic_hash             *all_streams;
     struct lsquic_cfcw              cfcw;
     struct lsquic_conn_cap          conn_cap;
-    struct lsquic_rtt_stats         rtt_stats;
+    struct lsquic_rtt_stats         rtt_stats;		/* ±£¥Êrtt–≈œ¢ */
     struct lsquic_engine_public    *enpub;
     struct malo                    *packet_out_malo;
     struct lsquic_conn             *lconn;
