@@ -23,6 +23,9 @@ struct lsquic_conn_cap {
     uint64_t cc_max;            /* Maximum cumulative number of bytes allowed
                                  * to be sent on this connection.
                                  */
+                                /* 连接级别的最大数据量, 表示流控中可发送的最大数据量
+                                 * 从对端发送的最大数据量(QUIC_FRAME_MAX_DATA)帧得到
+                                 */
     uint64_t cc_blocked;        /* Last blocked offset used */
 };
 

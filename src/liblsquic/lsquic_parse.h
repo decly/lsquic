@@ -19,26 +19,32 @@ enum lsquic_version;
 enum stream_dir;
 
 
-struct ack_info
+struct ack_info /* ack帧携带的range等信息, iquic由ietf_v1_parse_ack_frame()解析 */
 {
     enum packnum_space pns;
-    enum {
+    enum { /* flags的标志 */
         AI_ECN        = 1 << 0, /* ecn_counts[1,2,3] contain ECN counts */
+                                /* 表示ack帧携带了ecn反馈信息, 保存在ecn_counts中 */
         AI_TRUNCATED  = 1 << 1, /* There were more ranges to parse, but we
                                  * ran out of elements in `ranges'.
                                  */
+                                /* 表示ack帧中携带超过256个ack块, 超出的被忽略了 */
     }               flags;
     unsigned    n_ranges;       /* This is at least 1 */
+                                /* ranges的长度 */
                                 /* Largest acked is ack_info.ranges[0].high */
-    lsquic_time_t   lack_delta;	/* 对端携带的处理时延, 表示应用层延迟
-                                 * 为 对端发送该ACK的时间 - 对端此时收到最大包号的时间
+    lsquic_time_t   lack_delta;	/* 对端携带的处理时延, 表示应用层延迟(微秒)
+                                 * 指的是对端收到最大包号(ranges[0].high)的延迟,
+                                 * 即 对端发送该ACK的时间 - 对端收到最大包号的时间
                                  */
-    uint64_t        ecn_counts[4];
-    struct lsquic_packno_range ranges[256];
+    uint64_t        ecn_counts[4]; /* 保存从ack帧(类型0x03)中解析的ECN计数 */
+    struct lsquic_packno_range ranges[256]; /* 降序排列的range, 范围为[low, high] 包括上下边界 */
 };
 
+/* ack帧携带的最大确认包号 */
 #define largest_acked(acki) (+(acki)->ranges[0].high)
 
+/* ack帧携带的最小确认包号 */
 #define smallest_acked(acki) (+(acki)->ranges[(acki)->n_ranges - 1].low)
 
 /* Chrome may send an empty ACK frame when it closes a connection.
@@ -347,7 +353,7 @@ LSQUIC_EXTERN const struct parse_funcs lsquic_parse_funcs_ietf_v1;
                                          &lsquic_parse_funcs_gquic_Q046 :   \
     (1 << (ver)) & (1 << LSQVER_050)                            ?           \
                                          &lsquic_parse_funcs_gquic_Q050 :   \
-    &lsquic_parse_funcs_ietf_v1)
+    &lsquic_parse_funcs_ietf_v1)    /* iquic选择这个 */
 
 /* This function is gQUIC-version independent */
 int

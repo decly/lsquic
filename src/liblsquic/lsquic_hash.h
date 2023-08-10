@@ -12,13 +12,13 @@ extern "C" {
 
 struct lsquic_hash;
 
-struct lsquic_hash_elem
+struct lsquic_hash_elem /* 哈希表表项 */
 {
     TAILQ_ENTRY(lsquic_hash_elem)
                     qhe_next_bucket,
                     qhe_next_all;
     const void     *qhe_key_data;
-    void           *qhe_value;
+    void           *qhe_value;      /* 指向真正存储的value */
     unsigned        qhe_key_len;
     unsigned        qhe_hash_val;
     enum {

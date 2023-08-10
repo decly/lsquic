@@ -352,6 +352,7 @@ lsquic_send_ctl_set_max_bpq_count (unsigned);
 size_t
 lsquic_send_ctl_mem_used (const struct lsquic_send_ctl *);
 
+/* b为1时, 设置SC_BUFFER_STREAM位; 为0时清除SC_BUFFER_STREAM位 */
 #define lsquic_send_ctl_set_buffer_stream_packets(ctl, b) do {  \
     (ctl)->sc_flags &= ~SC_BUFFER_STREAM;                       \
     (ctl)->sc_flags |= -!!(b) & SC_BUFFER_STREAM;               \

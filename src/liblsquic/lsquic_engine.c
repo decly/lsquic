@@ -224,7 +224,7 @@ struct lsquic_engine
                         = (1 <<  8),    /* Previous call to a processing
                                          * function went past time threshold.
                                          */
-        ENG_CONNS_BY_ADDR
+        ENG_CONNS_BY_ADDR               /* 零长度的连接ID, 即不使用连接ID而是用IP端口 */
                         = (1 <<  9),    /* Connections are hashed by address */
         ENG_FORCE_RETRY = (1 << 10),    /* Will force retry packets to be sent */
 #ifndef NDEBUG
@@ -265,11 +265,11 @@ struct lsquic_engine
     regex_t                            lose_packets_re;
     const char                        *lose_packets_str;
 #endif
-    unsigned                           n_conns;
+    unsigned                           n_conns;             /* 当前连接个数(包括mini) */
     lsquic_time_t                      deadline;
     lsquic_time_t                      resume_sending_at;
     lsquic_time_t                      mem_logged_last;
-    unsigned                           mini_conns_count;
+    unsigned                           mini_conns_count;    /* 当前mini连接的个数 */
     struct lsquic_purga               *purga;
 #if LSQUIC_CONN_STATS
     struct {
@@ -278,7 +278,7 @@ struct lsquic_engine
     struct conn_stats                  conn_stats_sum;
     FILE                              *stats_fh;
 #endif
-    struct cid_update_batch            new_scids;
+    struct cid_update_batch            new_scids;       /* 用于批量(20个)通知使用方新注册的scid */
     struct out_batch                   out_batch;
 #if LSQUIC_COUNT_ENGINE_CALLS
     unsigned long                      n_engine_calls;
@@ -1038,7 +1038,7 @@ maybe_grow_conn_heaps (struct lsquic_engine *engine)
         return 0;   /* Nothing to do */
 
     if (lsquic_mh_nalloc(&engine->conns_tickable))
-        count = lsquic_mh_nalloc(&engine->conns_tickable) * 2 * 2;
+        count = lsquic_mh_nalloc(&engine->conns_tickable) * 2 * 2; /* 扩大4倍 */
     else
         count = 8;
 
@@ -1094,11 +1094,12 @@ insert_conn_into_hash (struct lsquic_engine *engine, struct lsquic_conn *conn,
     struct conn_cid_elem *cce;
     unsigned todo, done, n;
 
-    for (todo = conn->cn_cces_mask, done = 0, n = 0; todo; todo &= ~(1 << n++))
+    for (todo = conn->cn_cces_mask, done = 0, n = 0; todo; todo &= ~(1 << n++)) /* 从低位循环处理conn->cn_cces_mask每一位 */
         if (todo & (1 << n))
         {
             cce = &conn->cn_cces[n];
             assert(!(cce->cce_hash_el.qhe_flags & QHE_HASHED));
+            /* 将conn根据scid插入连接哈希表 */
             if (lsquic_hash_insert(engine->conns_hash, cce->cce_cid.idbuf,
                                     cce->cce_cid.len, conn, &cce->cce_hash_el))
                 done |= 1 << n;
@@ -1107,6 +1108,7 @@ insert_conn_into_hash (struct lsquic_engine *engine, struct lsquic_conn *conn,
             if ((engine->flags & ENG_SERVER) && 0 == (cce->cce_flags & CCE_REG))
             {
                 cce->cce_flags |= CCE_REG;
+                /* scid加到新创建scid队列里, 用于批量通知使用方(目前没有使用) */
                 cub_add(&engine->new_scids, &cce->cce_cid, peer_ctx);
             }
         }
@@ -1132,10 +1134,11 @@ new_full_conn_server (lsquic_engine_t *engine, lsquic_conn_t *mini_conn,
     flags = engine->flags & (ENG_SERVER|ENG_HTTP);
 
     if (mini_conn->cn_flags & LSCONN_IETF)
-        ctor = lsquic_ietf_full_conn_server_new;
+        ctor = lsquic_ietf_full_conn_server_new; /* iquic调用 */
     else
         ctor = lsquic_gquic_full_conn_server_new;
 
+    /* 创建full conn: struct ietf_full_conn */
     conn = ctor(&engine->pub, flags, mini_conn);
     if (!conn)
     {
@@ -1149,6 +1152,7 @@ new_full_conn_server (lsquic_engine_t *engine, lsquic_conn_t *mini_conn,
         return NULL;
     }
     ++engine->n_conns;
+    /* 将full conn加入连接表 */
     if (0 != insert_conn_into_hash(engine, conn, lsquic_conn_get_peer_ctx(conn, NULL)))
     {
         cid = lsquic_conn_log_cid(conn);
@@ -1175,6 +1179,7 @@ promote_mini_conn (lsquic_engine_t *engine, lsquic_conn_t *mini_conn,
     EV_LOG_CONN_EVENT(lsquic_conn_log_cid( mini_conn ),
                                         "promote to full conn");
     assert( mini_conn->cn_flags & LSCONN_MINI);
+    /* 根据mini conn创建full conn并加入连接表 */
     new_conn = new_full_conn_server(engine, mini_conn, now);
     if (new_conn)
     {
@@ -1184,6 +1189,7 @@ promote_mini_conn (lsquic_engine_t *engine, lsquic_conn_t *mini_conn,
         assert(engine->curr_conn == mini_conn);
         engine->curr_conn = new_conn;
 
+        /* 这里将mini conn从ATTQ和连接表删除, 当引用值都减掉了mini conn也被释放了 */
         if (mini_conn->cn_flags & LSCONN_ATTQ)
         {
             lsquic_attq_remove(engine->attq, mini_conn);
@@ -1192,6 +1198,7 @@ promote_mini_conn (lsquic_engine_t *engine, lsquic_conn_t *mini_conn,
         if (mini_conn->cn_flags & LSCONN_HASHED)
             remove_conn_from_hash(engine, mini_conn);
 
+        /* 将full conn加到tickable队列中 */
         if (!(new_conn->cn_flags & LSCONN_TICKABLE))
         {
             lsquic_mh_insert(&engine->conns_tickable, new_conn,
@@ -1218,22 +1225,22 @@ version_matches (lsquic_engine_t *engine, const lsquic_packet_in_t *packet_in,
     lsquic_ver_tag_t ver_tag;
     enum lsquic_version version;
 
-    if (!packet_in->pi_quic_ver)
+    if (!packet_in->pi_quic_ver) /* 包头没指定quic版本 */
     {
         LSQ_DEBUG("packet does not specify version");
         return VER_NOT_SPECIFIED;
     }
 
     memcpy(&ver_tag, packet_in->pi_data + packet_in->pi_quic_ver, sizeof(ver_tag));
-    version = lsquic_tag2ver(ver_tag);
+    version = lsquic_tag2ver(ver_tag); /* 4字节版本转换成enum lsquic_version */
     if (version < N_LSQVER)
     {
-        if (engine->pub.enp_settings.es_versions & (1 << version))
+        if (engine->pub.enp_settings.es_versions & (1 << version)) /* 是否为配置支持的版本 */
         {
             LSQ_DEBUG("client-supplied version %s is supported",
                                                 lsquic_ver2str[version]);
             *pversion = version;
-            return VER_SUPPORTED;
+            return VER_SUPPORTED; /* 支持的版本 */
         }
         else
             LSQ_DEBUG("client-supplied version %s is not supported",
@@ -1243,7 +1250,7 @@ version_matches (lsquic_engine_t *engine, const lsquic_packet_in_t *packet_in,
         LSQ_DEBUG("client-supplied version tag 0x%08X is not recognized",
                                                 ver_tag);
 
-    return VER_UNSUPPORTED;
+    return VER_UNSUPPORTED; /* 不支持的版本 */
 }
 
 
@@ -1410,27 +1417,34 @@ find_or_create_conn (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     struct purga_el *puel;
     lsquic_conn_t *conn;
 
+    /* 包里没有指定目的cid */
     if (!(packet_in->pi_flags & PI_CONN_ID))
     {
         LSQ_DEBUG("packet header does not have connection ID: discarding");
         return NULL;
     }
+    /* 根据目的cid查找连接 */
     el = lsquic_hash_find(engine->conns_hash,
                     packet_in->pi_conn_id.idbuf, packet_in->pi_conn_id.len);
 
-    if (el)
+    if (el) /* 找到连接后返回 */
     {
         conn = lsquic_hashelem_getdata(el);
         conn->cn_pf->pf_parse_packet_in_finish(packet_in, ppstate);
         return conn;
     }
+    /*
+     * 没找到连接则尝试新建连接
+     */
 
+    /* 服务器正在关闭, 禁止新建连接 */
     if (engine->flags & ENG_COOLDOWN)
     {   /* Do not create incoming connections during cooldown */
         LSQ_DEBUG("dropping inbound packet for unknown connection (cooldown)");
         return NULL;
     }
 
+    /* mini连接超过上限LSQUIC_DF_MAX_INCHOATE, 禁止新建连接 */
     if (engine->mini_conns_count >= engine->pub.enp_settings.es_max_inchoate)
     {
         LSQ_DEBUG("reached limit of %u inchoate connections",
@@ -1439,6 +1453,7 @@ find_or_create_conn (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     }
 
 
+    /* 垃圾回收机制(存储需要清除的连接)? */
     if (engine->purga
         && (puel = lsquic_purga_contains(engine->purga,
                                         &packet_in->pi_conn_id), puel))
@@ -1481,41 +1496,48 @@ find_or_create_conn (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
         }
     }
 
+    /* iquic针对找不到cid连接的的短包头数据包 响应reset包,
+     * 这个功能默认关闭的
+     */
     if (engine->pub.enp_settings.es_send_prst
             && !(packet_in->pi_flags & PI_GQUIC)
             && HETY_NOT_SET == packet_in->pi_header_type)
         goto maybe_send_prst;
 
+    /* 判断是否要扩大conns_tickable堆 */
     if (0 != maybe_grow_conn_heaps(engine))
         return NULL;
 
+    /* 接下来检查包头里携带的quic版本 */
     const struct parse_funcs *pf;
     enum lsquic_version version;
     switch (version_matches(engine, packet_in, &version))
     {
-    case VER_UNSUPPORTED:
+    case VER_UNSUPPORTED: /* 版本不支持, 回复版本协商包 */
         if (engine->flags & ENG_SERVER)
             schedule_req_packet(engine, PACKET_REQ_VERNEG, packet_in,
                                                 sa_local, sa_peer, peer_ctx);
         return NULL;
-    case VER_NOT_SPECIFIED:
+    case VER_NOT_SPECIFIED: /* 包头未指定版本(也包括短包头数据包找不到连接),
+                             * 回复无状态重置包(默认关闭不回复)
+                             */
   maybe_send_prst:
         if ((engine->flags & ENG_SERVER) &&
                                         engine->pub.enp_settings.es_send_prst)
             schedule_req_packet(engine, PACKET_REQ_PUBRES, packet_in,
                                                 sa_local, sa_peer, peer_ctx);
         return NULL;
-    case VER_SUPPORTED:
-        pf = select_pf_by_ver(version);
+    case VER_SUPPORTED: /* 长包头并且是支持的版本 */
+        pf = select_pf_by_ver(version); /* 根据版本选择协议函数集, iquic为lsquic_parse_funcs_ietf_v1 */
         pf->pf_parse_packet_in_finish(packet_in, ppstate);
         break;
     }
 
 
-    if ((1 << version) & LSQUIC_IETF_VERSIONS)
+    if ((1 << version) & LSQUIC_IETF_VERSIONS) /* iquic各版本 */
     {
         lsquic_cid_t odcid;
-        if (engine->pub.enp_settings.es_support_srej
+        if (engine->pub.enp_settings.es_support_srej /* srej默认关闭 */
                                 && HETY_INITIAL == packet_in->pi_header_type)
         {
             /* XXX Need to handle condition when packets are reordered? */
@@ -1564,12 +1586,12 @@ find_or_create_conn (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
         }
         else
             odcid.len = 0;
-  create_ietf_mini_conn:
+  create_ietf_mini_conn: /* iquic创建mini连接 */
         conn = lsquic_mini_conn_ietf_new(&engine->pub, packet_in, version,
                     sa_peer->sa_family == AF_INET, odcid.len ? &odcid : NULL,
                     packet_in_size);
     }
-    else
+    else /* gquic创建mini连接 */
     {
         conn = lsquic_mini_conn_new(&engine->pub, packet_in, version);
     }
@@ -1577,6 +1599,7 @@ find_or_create_conn (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
         return NULL;
     ++engine->mini_conns_count;
     ++engine->n_conns;
+    /* 将conn加入连接表 */
     if (0 != insert_conn_into_hash(engine, conn, peer_ctx))
     {
         const lsquic_cid_t *cid = lsquic_conn_log_cid(conn);
@@ -1618,7 +1641,7 @@ lsquic_engine_add_conn_to_tickable (struct lsquic_engine_public *enpub,
         0 == (conn->cn_flags & (LSCONN_TICKABLE|LSCONN_NEVER_TICKABLE)))
     {
         lsquic_engine_t *engine = (lsquic_engine_t *) enpub;
-	/* 将连接按照cn_last_ticked排序插入conns_tickable堆中 */
+        /* 将连接按照cn_last_ticked排序插入conns_tickable堆中 */
         lsquic_mh_insert(&engine->conns_tickable, conn, conn->cn_last_ticked);
         engine_incref_conn(conn, LSCONN_TICKABLE);
     }
@@ -1696,6 +1719,7 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     /* 查找连接 */
     if (engine->flags & ENG_SERVER)
     {
+        /* 服务端先查找连接, 找不到则根据长包头创建mini连接 */
         conn = find_or_create_conn(engine, packet_in, ppstate, sa_local,
                                             sa_peer, peer_ctx, packet_in_size);
         if (!engine->curr_conn)
@@ -1704,9 +1728,9 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     else
         conn = find_conn(engine, packet_in, ppstate, sa_local);
 
-    if (!conn)
+    if (!conn) /* 找不到连接则丢弃 */
     {
-        if (engine->pub.enp_settings.es_honor_prst
+        if (engine->pub.enp_settings.es_honor_prst /* 默认关闭 */
                 && packet_in_size == packet_in->pi_data_sz /* Full UDP packet */
                 && !(packet_in->pi_flags & PI_GQUIC)
                 && engine->pub.enp_srst_hash
@@ -1737,6 +1761,7 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
         lsquic_mh_insert(&engine->conns_tickable, conn, conn->cn_last_ticked);
         engine_incref_conn(conn, LSCONN_TICKABLE);
     }
+    /* 记录两端的IP地址并返回该地址在连接ifc_paths中的索引 */
     packet_in->pi_path_id = lsquic_conn_record_sockaddr(conn, peer_ctx,
                                                         sa_local, sa_peer);
     lsquic_packet_in_upref(packet_in);
@@ -1762,6 +1787,9 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
      */
     packet_in_data = packet_in->pi_data;
     packet_in_size = packet_in->pi_data_sz;
+    /* 这里处理解析数据包
+     * iquic的full conn的函数为ietf_full_conn_ci_packet_in, 解析各类帧
+     */
     conn->cn_if->ci_packet_in(conn, packet_in);
 #if LSQUIC_CONN_STATS
     engine->busy.pin_conn = conn;
@@ -1771,6 +1799,7 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     if ((conn->cn_flags & (LSCONN_MINI | LSCONN_HANDSHAKE_DONE))
                     == (LSCONN_MINI | LSCONN_HANDSHAKE_DONE))
     {
+        /* 握手完成了, 将mini conn提升为full conn(实际上创建full conn后释放了mini conn) */
         if (promote_mini_conn(engine, conn, lsquic_time_now()) == -1)
             conn->cn_flags |= LSCONN_PROMOTE_FAIL;
     }
@@ -2079,6 +2108,7 @@ engine_decref_conn (lsquic_engine_t *engine, lsquic_conn_t *conn,
                     CID_BITS(lsquic_conn_log_cid(conn)),
                     (refflags2str(conn->cn_flags | flags, str[0]), str[0]),
                     (refflags2str(conn->cn_flags, str[1]), str[1]));
+    /* 没有这些标志说明没被引用了, 可以释放了 */
     if (0 == (conn->cn_flags & CONN_REF_FLAGS))
     {
         now = lsquic_time_now();
@@ -3205,7 +3235,7 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
 
     ENGINE_CALLS_INCR(engine);
 
-    if (engine->flags & ENG_SERVER)
+    if (engine->flags & ENG_SERVER) /* 服务端的函数, 下面调用 */
         parse_packet_in_begin = lsquic_parse_packet_in_server_begin;
     else if (engine->flags & ENG_CONNS_BY_ADDR)
     {
@@ -3238,8 +3268,9 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
     cid.len = 0;
     cid.idbuf[0] = 0;
 #endif
-    do
+    do /* 一个UDP报文中可以有多个quic数据包, 循环处理 */
     {
+        /* 分配一个packet_in, 然后下面根据接收的包进行初始化 */
         packet_in = lsquic_mm_get_packet_in(&engine->pub.enp_mm);
         if (!packet_in)
             return -1;
@@ -3247,7 +3278,10 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
          * this function returns and subsequent release of pi_data is guarded
          * by PI_OWN_DATA flag.
          */
-        packet_in->pi_data = (unsigned char *) packet_in_data;
+        packet_in->pi_data = (unsigned char *) packet_in_data; /* 设置包的起始数据 */
+        /* 这里解析quic包头字段, 初始化packet_in, 
+         * 函数在上面选择, 比如服务端调用lsquic_parse_packet_in_server_begin()
+         */
         if (0 != parse_packet_in_begin(packet_in, packet_end - packet_in_data,
                                 engine->flags & ENG_SERVER,
                                 engine->pub.enp_settings.es_scid_len, &ppstate))
@@ -3263,6 +3297,7 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
          * " Receivers SHOULD ignore any subsequent packets with a different
          * " Destination Connection ID than the first packet in the datagram.
          */
+        /* iquic中规定, 一个UDP报文中不允许有多个不同目的cid的包, 有的话后面的包需要丢弃 */
         if (is_ietf && packet_in_data > packet_begin)
         {
             if (!((packet_in->pi_flags & (PI_GQUIC|PI_CONN_ID)) == PI_CONN_ID
@@ -3274,8 +3309,8 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
             }
         }
 
-        is_ietf = 0 == (packet_in->pi_flags & PI_GQUIC);
-        packet_in_data += packet_in->pi_data_sz;
+        is_ietf = 0 == (packet_in->pi_flags & PI_GQUIC); /* 是iquic */
+        packet_in_data += packet_in->pi_data_sz; /* 下一个包的起始 */
         if (is_ietf && packet_in_data < packet_end)
         {
             cid = packet_in->pi_dcid;
@@ -3286,10 +3321,11 @@ lsquic_engine_packet_in (lsquic_engine_t *engine,
         packet_in->pi_received = lsquic_time_now();
         packet_in->pi_flags |= (3 & ecn) << PIBIT_ECN_SHIFT;
         eng_hist_inc(&engine->history, packet_in->pi_received, sl_packets_in);
+        /* 这里真正处理数据包, 正常返回0 */
         s = process_packet_in(engine, packet_in, &ppstate, sa_local, sa_peer,
                             peer_ctx, packet_in_size);
         n_zeroes += s == 0;
-    }
+    } /* 当一个包异常时, 同一udp报文中后面的包也都直接丢弃 */
     while (0 == s && packet_in_data < packet_end);
 
     return n_zeroes > 0 ? 0 : s;

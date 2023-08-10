@@ -24,7 +24,7 @@ parse_ietf_v1_or_Q046plus_long_begin (struct lsquic_packet_in *packet_in,
     enum lsquic_version version;
     if (length < 6)
         return -1;
-    version = lsquic_tag2ver_fast(packet_in->pi_data + 1);
+    version = lsquic_tag2ver_fast(packet_in->pi_data + 1); /* 解析4字节的版本 */
     if (version != N_LSQVER)
     {
         packet_in->pi_version = version;
@@ -38,7 +38,7 @@ parse_ietf_v1_or_Q046plus_long_begin (struct lsquic_packet_in *packet_in,
     case LSQVER_050:
         return lsquic_Q050_parse_packet_in_long_begin(packet_in, length,
                                                 is_server, cid_len, state);
-    default:
+    default: /* iquic */
         return lsquic_ietf_v1_parse_packet_in_long_begin(packet_in, length,
                                                 is_server, cid_len, state);
     }
@@ -51,8 +51,8 @@ static int (* const parse_begin_funcs[32]) (struct lsquic_packet_in *,
 {
     /* Xs vary, Gs are iGnored: */
 #define PBEL(mask) [(mask) >> 3]
-    /* 1X11 XGGG: */
-    PBEL(0x80|0x40|0x20|0x10|0x08)  = parse_ietf_v1_or_Q046plus_long_begin,
+    /* 1X11 XGGG: *//* 以下是长包头(最高位为1) */
+    PBEL(0x80|0x40|0x20|0x10|0x08)  = parse_ietf_v1_or_Q046plus_long_begin, /* iquic解析长包头 */
     PBEL(0x80|0x00|0x20|0x10|0x08)  = parse_ietf_v1_or_Q046plus_long_begin,
     PBEL(0x80|0x40|0x20|0x10|0x00)  = parse_ietf_v1_or_Q046plus_long_begin,
     PBEL(0x80|0x00|0x20|0x10|0x00)  = parse_ietf_v1_or_Q046plus_long_begin,
@@ -71,8 +71,8 @@ static int (* const parse_begin_funcs[32]) (struct lsquic_packet_in *,
     PBEL(0x80|0x00|0x20|0x00|0x08)  = parse_ietf_v1_or_Q046plus_long_begin,
     PBEL(0x80|0x40|0x20|0x00|0x00)  = parse_ietf_v1_or_Q046plus_long_begin,
     PBEL(0x80|0x00|0x20|0x00|0x00)  = parse_ietf_v1_or_Q046plus_long_begin,
-    /* 01XX XGGG */
-    PBEL(0x00|0x40|0x00|0x00|0x00)  = lsquic_ietf_v1_parse_packet_in_short_begin,
+    /* 01XX XGGG *//* 以下是短包头(最高位为0) */
+    PBEL(0x00|0x40|0x00|0x00|0x00)  = lsquic_ietf_v1_parse_packet_in_short_begin, /* iquic解析短包头 */
     PBEL(0x00|0x40|0x00|0x00|0x08)  = lsquic_ietf_v1_parse_packet_in_short_begin,
     PBEL(0x00|0x40|0x00|0x10|0x00)  = lsquic_ietf_v1_parse_packet_in_short_begin,
     PBEL(0x00|0x40|0x00|0x10|0x08)  = lsquic_ietf_v1_parse_packet_in_short_begin,
@@ -100,6 +100,7 @@ lsquic_parse_packet_in_server_begin (struct lsquic_packet_in *packet_in,
                     struct packin_parse_state *state)
 {
     if (length)
+        /* 根据包的前5bit对应处理函数数组 */
         return parse_begin_funcs[ packet_in->pi_data[0] >> 3 ](
                                     packet_in, length, 1, cid_len, state);
     else

@@ -532,13 +532,14 @@ ietf_v1_parse_stream_frame (const unsigned char *buf, size_t rem_packet_sz,
     int r;
 
     CHECK_SPACE(1, p, pend);
-    const char type = *p++;
+    const char type = *p++; /* 首字节类型 */
 
-    r = vint_read(p, pend, &stream_id);
+    r = vint_read(p, pend, &stream_id); /* 获取stream id, 长度为r */
     if (r < 0)
         return -1;
     p += r;
 
+    /* 获取offset偏移字段 */
     if (type & 0x4)
     {
         r = vint_read(p, pend, &offset);
@@ -547,18 +548,19 @@ ietf_v1_parse_stream_frame (const unsigned char *buf, size_t rem_packet_sz,
         p += r;
     }
     else
-        offset = 0;
+        offset = 0; /* offset不存在则为0 */
 
+    /* 获取len数据长度 */
     if (type & 0x2)
     {
         r = vint_read(p, pend, &data_sz);
         if (r < 0)
             return -1;
         p += r;
-        CHECK_SPACE(data_sz, p, pend);
+        CHECK_SPACE(data_sz, p, pend); /* 检查帧数据长度是否足够data_sz */
     }
     else
-        data_sz = pend - p;
+        data_sz = pend - p; /* len位为0时, len为数据包剩余所有字节 */
 
     /* Largest offset cannot exceed this value and we MUST detect this error */
     if (VINT_MAX_VALUE - offset < data_sz)
@@ -574,7 +576,7 @@ ietf_v1_parse_stream_frame (const unsigned char *buf, size_t rem_packet_sz,
 
     assert(p <= pend);
 
-    return p + data_sz - (unsigned char *) buf;
+    return p + data_sz - (unsigned char *) buf; /* 返回帧的长度 */
 }
 
 
@@ -645,7 +647,7 @@ ietf_v1_parse_crypto_frame (const unsigned char *buf, size_t rem_packet_sz,
 /* Bits 10 (2) is ECT(0); * bits 01 (1) is ECT(1). */
 static const int ecnmap[4] = { 0, 2, 1, 3, };
 
-
+/* 解析ack帧 */
 static int
 ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
                                             struct ack_info *ack, uint8_t exp)
@@ -657,42 +659,56 @@ ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
     unsigned i;
     int r;
 
-    ++p;
-    r = vint_read(p, end, &ack->ranges[0].high);
+    ++p; /* 跳过ACK帧类型 */
+    r = vint_read(p, end, &ack->ranges[0].high); /* 最大确认包号, 即range[0]的上边界 */
     if (UNLIKELY(r < 0))
         return -1;
     p += r;
-    r = vint_read(p, end, &ack->lack_delta);
+    r = vint_read(p, end, &ack->lack_delta); /* ACK延迟 */
     if (UNLIKELY(r < 0))
         return -1;
     p += r;
-    ack->lack_delta <<= exp;
-    r = vint_read(p, end, &block_count);
+    ack->lack_delta <<= exp; /* 延迟需要乘以 2^ack_delay_exponent */
+    r = vint_read(p, end, &block_count); /* 后面ACK块个数 */
     if (UNLIKELY(r < 0))
         return -1;
     p += r;
-    r = vint_read(p, end, &block);
+    r = vint_read(p, end, &block); /* first_ack_range, 即range[0]的长度 */
     if (UNLIKELY(r < 0))
         return -1;
+    /* range[0]的下边界为: 最大确认包号 - first_ack_range */
     ack->ranges[0].low = ack->ranges[0].high - block;
     if (UNLIKELY(ack->ranges[0].high < ack->ranges[0].low))
         return -1;
     p += r;
 
+    /* 接下来就是遍历各ACK块, 每个ack块由 {gap, ack_range_length} 组成,
+     * range是通过包号降序排列的, 而且是根据上一个range的偏移, 而不是包号绝对值
+     * 而首个range[0]即由最大确认包号和first_ack_range确定,
+     * 接下来从range[1]开始获取每个range块:
+     *   gap为 上一个range.low 之前连续未确认的个数 - 1,
+     *   即与上个range之间洞的大小 - 1(减1是因为洞至少为1, 所以gap从0开始, 即gap=0表示1个包号的洞)
+     *       所以 range[i].high = range[i-1].low - gap - 2
+     *   ack_range_length为 high之前连续确认的个数
+     *       所以 range[i].low  = range[i].high - ack_range_length
+     */
     for (i = 1; i <= block_count; ++i)
     {
-        r = vint_read(p, end, &gap);
+        r = vint_read(p, end, &gap); /* 获取gap: 与上一个range之间连续未确认个数, 即与上个range之间洞的大小 */
         if (UNLIKELY(r < 0))
             return -1;
         p += r;
-        r = vint_read(p, end, &block);
+        r = vint_read(p, end, &block); /* 获取ack_range_length: 连续确认个数, 即本range的大小 */
         if (UNLIKELY(r < 0))
             return -1;
         p += r;
-        if (i < sizeof(ack->ranges) / sizeof(ack->ranges[0]))
+        if (i < sizeof(ack->ranges) / sizeof(ack->ranges[0])) /* ack_info实现中最多保存256个range */
         {
+            /* 计算range范围, 见上面注释 */
             ack->ranges[i].high = ack->ranges[i - 1].low - gap - 2;
             ack->ranges[i].low  = ack->ranges[i].high - block;
+
+            /* range是降序排序的, 不是则出错 */
             if (UNLIKELY(ack->ranges[i].high >= ack->ranges[i - 1].low
                          || ack->ranges[i].high < ack->ranges[i].low))
                 return -1;
@@ -706,11 +722,12 @@ ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
     }
     else
     {
-        ack->flags = AI_TRUNCATED;
+        ack->flags = AI_TRUNCATED; /* 超过256个ack块, 被截断标志 */
         ack->n_ranges = sizeof(ack->ranges) / sizeof(ack->ranges[0]);
     }
 
 
+    /* ack帧类型为0x03时也会包括ECN反馈信息 */
     if (0x03 == buf[0])
     {
         for (ecn = 1; ecn <= 3; ++ecn)
@@ -785,13 +802,13 @@ ietf_v1_parse_rst_frame (const unsigned char *buf, size_t buf_len,
     p += r;
 
     /* Application Error Code (i) */
-    r = vint_read(p, end, &error_code);
+    r = vint_read(p, end, &error_code); /* 表明为何关闭该流的应用层协议错误码 */
     if (r < 0)
         return r;
     p += r;
 
     /* Final Size (i) */
-    r = vint_read(p, end, &final_size);
+    r = vint_read(p, end, &final_size); /* 表示重置帧发送方的流最终大小，单位字节 */
     if (r < 0)
         return r;
     p += r;
@@ -1134,6 +1151,7 @@ ietf_v1_parse_frame_type (const unsigned char *buf, size_t len)
     uint64_t val;
     int s;
 
+    /* 首个字节为帧类型, 直接通过数组索引得到类型 */
     if (len > 0 && buf[0] < 0x40)
         return lsquic_iquic_byte2type[buf[0]];
 
@@ -1553,9 +1571,9 @@ ietf_v1_parse_streams_blocked_frame (const unsigned char *buf, size_t len,
     if (s > 0)
     {
         if (buf[0] == 0x16)
-            *sd = SD_BIDI;
+            *sd = SD_BIDI; /* 0x16表示双向流 */
         else
-            *sd = SD_UNI;
+            *sd = SD_UNI; /* 0x17表示单向流 */
     }
     return s;
 }
@@ -1752,25 +1770,26 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
     if (length < 6)
         return -1;
     first_byte = *p++;
+    /* 还没解析就先解析quic版本 */
     if ((packet_in->pi_flags & PI_VER_PARSED) == 0)
     {
         packet_in->pi_version = lsquic_tag2ver_fast(p);
         packet_in->pi_flags |= PI_VER_PARSED;
     }
-    p += 4;
+    p += 4; /* 现在指向了目的cid长度字段 */
     if (packet_in->pi_version != LSQVER_VERNEG)
     {
         if (packet_in->pi_version == LSQVER_I002)
             header_type = bits2ht_v2[ (first_byte >> 4) & 3 ];
         else
-            header_type = bits2ht[ (first_byte >> 4) & 3 ];
+            header_type = bits2ht[ (first_byte >> 4) & 3 ]; /* 长数据包类型 */
     }
     else
         header_type = HETY_VERNEG;
 
     packet_in->pi_header_type = header_type;
 
-    dcil = *p++;
+    dcil = *p++; /* 目的cid长度 */
     if (p + dcil >= end || dcil > MAX_CID_LEN)
         return -1;
     if (dcil)
@@ -1781,7 +1800,7 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
     }
     packet_in->pi_dcid.len = dcil;
 
-    scil = *p++;
+    scil = *p++; /* 源cid长度 */
     if (p + scil > end || scil > MAX_CID_LEN)
         return -1;
     if (scil)
@@ -1791,7 +1810,7 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
     }
     packet_in->pi_scid_len = scil;
 
-    switch (header_type)
+    switch (header_type) /* 4中长数据包类型的处理 */
     {
     case HETY_INITIAL:
 #if LSQUIC_QIR
@@ -2008,20 +2027,20 @@ lsquic_ietf_v1_parse_packet_in_short_begin (struct lsquic_packet_in *packet_in,
     /* [draft-ietf-quic-transport-17] Section 17.3 */
     /* 01SRRKPP */
 
-    if (cid_len)
+    if (cid_len) /* 获取目的cid */
     {
         header_sz = 1 + cid_len;
         if (length < header_sz)
             return -1;
-        memcpy(packet_in->pi_dcid.idbuf, packet_in->pi_data + 1, cid_len);
+        memcpy(packet_in->pi_dcid.idbuf, packet_in->pi_data + 1, cid_len); /* 保存目的cid */
         packet_in->pi_dcid.len = cid_len;
         packet_in->pi_flags |= PI_CONN_ID;
     }
     else
         header_sz = 1;
 
-    packet_in->pi_flags |= ((byte & 0x20) > 0) << PIBIT_SPIN_SHIFT;
-    packet_in->pi_flags |= (byte & 3) << PIBIT_BITS_SHIFT;
+    packet_in->pi_flags |= ((byte & 0x20) > 0) << PIBIT_SPIN_SHIFT; /* 自旋比特位 */
+    packet_in->pi_flags |= (byte & 3) << PIBIT_BITS_SHIFT; /* 数据包号长度 */
 
     packet_in->pi_header_sz     = header_sz;
     packet_in->pi_data_sz       = length;
@@ -2035,7 +2054,7 @@ lsquic_ietf_v1_parse_packet_in_short_begin (struct lsquic_packet_in *packet_in,
 
     /* This is so that Q046 works, ID-18 code does not use it */
     state->pps_p                = packet_in->pi_data + header_sz;
-    state->pps_nbytes           = 1 + (byte & 3);
+    state->pps_nbytes           = 1 + (byte & 3); /* 数据包号长度为最低2位的值 + 1 */
 
     return 0;
 }
@@ -2271,7 +2290,7 @@ ietf_v1_gen_datagram_frame (unsigned char *buf, size_t bufsz, size_t min_sz,
         return -1;
 }
 
-
+/* iquic解析各种包头和帧的函数集合 */
 const struct parse_funcs lsquic_parse_funcs_ietf_v1 =
 {
     .pf_gen_reg_pkt_header            =  ietf_v1_gen_reg_pkt_header,

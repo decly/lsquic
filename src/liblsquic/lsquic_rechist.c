@@ -287,20 +287,21 @@ lsquic_rechist_received (lsquic_rechist_t *rechist, lsquic_packno_t packno,
     if (packno < rechist->rh_cutoff)
         return REC_ST_DUP;
 
-    el = &rechist->rh_elems[rechist->rh_head];
+    el = &rechist->rh_elems[rechist->rh_head]; /* 首个包号区间, 即最高包号的区间 */
     prev = NULL;
 
     if (packno > RE_HIGH(el))
         rechist->rh_largest_acked_received = now;
 
-    while (1)
+    while (1) /* rh_elems是按照包号(re_low)递减排序的 */
     {
-        if (packno > RE_HIGH(el) + 1)
+        if (packno > RE_HIGH(el) + 1) /* 比当前的大且不相邻, 插入之前 */
             goto insert_before;
-        if (packno == el->re_low - 1)
+        if (packno == el->re_low - 1) /* 包号刚好相邻小1, 可以合并 */
         {
             --el->re_low;
             ++el->re_count;
+            /* 再判断是否和next也相邻, 相邻则合并 */
             if (el->re_next != UINT_MAX
                 && el->re_low == RE_HIGH(&rechist->rh_elems[el->re_next]) + 1)
             {
@@ -312,15 +313,16 @@ lsquic_rechist_received (lsquic_rechist_t *rechist, lsquic_packno_t packno,
             rechist_sanity_check(rechist);
             return REC_ST_OK;
         }
-        if (packno == RE_HIGH(el) + 1)
+        if (packno == RE_HIGH(el) + 1) /* 包号相邻大1, 直接增加count就行 */
         {
             ++el->re_count;
             rechist_sanity_check(rechist);
             return REC_ST_OK;
         }
+        /* 包号在范围内, 重复了 */
         if (packno >= el->re_low && packno <= RE_HIGH(el))
             return REC_ST_DUP;
-        if (el->re_next == UINT_MAX)
+        if (el->re_next == UINT_MAX) /* 遍历到尾部了 */
             break;  /* insert tail */
         prev = el;
         el = &rechist->rh_elems[el->re_next];

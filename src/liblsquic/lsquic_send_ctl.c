@@ -404,6 +404,7 @@ lsquic_send_ctl_init (lsquic_send_ctl_t *ctl, struct lsquic_alarmset *alset,
     if (!(ctl->sc_conn_pub->lconn->cn_flags & LSCONN_SERVER))
         ctl->sc_senhist.sh_last_sent = ctl->sc_cur_packno;
 #endif
+    /* 设置拥塞算法 */
     switch (enpub->enp_settings.es_cc_algo)
     {
     case 1:
@@ -2414,7 +2415,7 @@ lsquic_send_ctl_new_packet_out (lsquic_send_ctl_t *ctl, unsigned need_at_least,
     if (!packet_out)
         return NULL;
 
-    packet_out->po_packno = send_ctl_next_packno(ctl);
+    packet_out->po_packno = send_ctl_next_packno(ctl); /* 设置包号 */
     LSQ_DEBUG("created packet #%"PRIu64, packet_out->po_packno);
     EV_LOG_PACKET_CREATED(LSQUIC_LOG_CONN_ID, packet_out);
     return packet_out;
@@ -2461,6 +2462,7 @@ lsquic_send_ctl_get_writeable_packet (lsquic_send_ctl_t *ctl,
 
     assert(need_at_least > 0);
 
+    /* 先检查scheduled队列的最后一个packet是否还有空间, 有则直接使用 */
     packet_out = lsquic_send_ctl_last_scheduled(ctl, pns, path, regen_match);
     if (packet_out
         && !(packet_out->po_flags & (PO_MINI|PO_STREAM_END|PO_RETX))
@@ -2469,6 +2471,7 @@ lsquic_send_ctl_get_writeable_packet (lsquic_send_ctl_t *ctl,
         return packet_out;
     }
 
+    /* 检查当前cwnd和pacing能否发送 */
     if (!lsquic_send_ctl_can_send(ctl))
     {
         if (is_err)
@@ -2476,11 +2479,12 @@ lsquic_send_ctl_get_writeable_packet (lsquic_send_ctl_t *ctl,
         return NULL;
     }
 
+    /* 分配一个新的packet */
     packet_out = lsquic_send_ctl_new_packet_out(ctl, need_at_least, pns, path);
     if (packet_out)
     {
         lsquic_packet_out_set_pns(packet_out, pns);
-        lsquic_send_ctl_scheduled_one(ctl, packet_out);
+        lsquic_send_ctl_scheduled_one(ctl, packet_out); /* 加到scheduled队列中并设置pacing */
     }
     else if (is_err)
         *is_err = 1;

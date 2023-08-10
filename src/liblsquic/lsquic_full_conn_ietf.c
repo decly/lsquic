@@ -110,7 +110,7 @@
  */
 enum ifull_conn_flags
 {
-    IFC_SERVER        = LSENG_SERVER,   /* Server mode */
+    IFC_SERVER        = LSENG_SERVER,   /* Server mode *//* 作为服务端 */
     IFC_HTTP          = LSENG_HTTP,     /* HTTP mode */
     IFC_ACK_HAD_MISS  = 1 << 2,
 #define IFC_BIT_ERROR 3
@@ -118,12 +118,12 @@ enum ifull_conn_flags
     IFC_TIMED_OUT     = 1 << 4,
     IFC_ABORTED       = 1 << 5,
     IFC_HSK_FAILED    = 1 << 6,
-    IFC_GOING_AWAY    = 1 << 7,
+    IFC_GOING_AWAY    = 1 << 7, /* 表示服务正在关闭, 不能创建新连接和新流 */
     IFC_CLOSING       = 1 << 8,   /* Closing */
     IFC_RECV_CLOSE    = 1 << 9,  /* Received CONNECTION_CLOSE frame */
     IFC_TICK_CLOSE    = 1 << 10,  /* We returned TICK_CLOSE */
     IFC_CREATED_OK    = 1 << 11,
-    IFC_HAVE_SAVED_ACK= 1 << 12, /* 表示缓存了ACK信息等待tick处理 */
+    IFC_HAVE_SAVED_ACK= 1 << 12, /* 表示conn->ifc_ack中缓存了ACK信息等待tick处理 */
     IFC_ABORT_COMPLAINED
                       = 1 << 13,
     IFC_DCID_SET      = 1 << 14,
@@ -406,16 +406,19 @@ struct ietf_full_conn
 {
     struct lsquic_conn          ifc_conn;
     struct conn_cid_elem        ifc_cces[MAX_SCID];
-    struct lsquic_rechist       ifc_rechist[N_PNS];
+    struct lsquic_rechist       ifc_rechist[N_PNS];             /* 接收到的包号区间 */
     /* App PNS only, used to calculate was_missing: */
     lsquic_packno_t             ifc_max_ackable_packno_in;
     struct lsquic_send_ctl      ifc_send_ctl;
     struct lsquic_conn_public   ifc_pub;
     lsquic_alarmset_t           ifc_alset;
-    struct lsquic_set64         ifc_closed_stream_ids[N_SITS];
-    lsquic_stream_id_t          ifc_n_created_streams[N_SDS];
+    struct lsquic_set64         ifc_closed_stream_ids[N_SITS];  /* 记录被关闭的流ID */
+    lsquic_stream_id_t          ifc_n_created_streams[N_SDS];   /* 已经创建流的个数, 双向流和单向流的id是独立的 */
     /* Not including the value stored in ifc_max_allowed_stream_id: */
-    lsquic_stream_id_t          ifc_max_allowed_stream_id[N_SITS];
+    lsquic_stream_id_t          ifc_max_allowed_stream_id[N_SITS]; /* 允许的最大流数(累积), 即不允许 流ID >= 该值
+                                                                    * 注意这个值是包括流类型的(也就是左移了2bit但低2bit为0)
+                                                                    * 接收最大流帧(QUIC_FRAME_MAX_STREAMS)会更新该值
+                                                                    */
     uint64_t                    ifc_closed_peer_streams[N_SDS];
     /* Maximum number of open stream initiated by peer: */
     unsigned                    ifc_max_streams_in[N_SDS];
@@ -440,12 +443,15 @@ struct ietf_full_conn
                                 ifc_stream_ids_to_ss;
     lsquic_time_t               ifc_created;
     lsquic_time_t               ifc_saved_ack_received;     /* ifc_ack缓存里最新的ACK的接收时间 */
-    lsquic_packno_t             ifc_max_ack_packno[N_PNS];
+    lsquic_packno_t             ifc_max_ack_packno[N_PNS];  /* 保存当前收到的ACK帧最大包号 */
     lsquic_packno_t             ifc_max_non_probing;
     struct {
         uint64_t    max_stream_send;
-        uint8_t     ack_exp;
+        uint8_t     ack_exp;    /* ACK延迟指数(ack_delay_exponent传输参数, 没指定则为TP_DEF_ACK_DELAY_EXP, 为3),
+                                 * 对端发送的ACK帧中的ACK延迟需要乘以 2^ack_exp 才是实际值, 用于扩大ACK延迟表示区间
+                                 */
     }                           ifc_cfg;
+    /* 处理接收包的函数, iquic的服务端为process_incoming_packet_fast() */
     int                       (*ifc_process_incoming_packet)(
                                                 struct ietf_full_conn *,
                                                 struct lsquic_packet_in *);
@@ -455,7 +461,7 @@ struct ietf_full_conn
     unsigned                    ifc_max_retx_since_last_ack;
     lsquic_time_t               ifc_max_ack_delay;
     uint64_t                    ifc_ecn_counts_in[N_PNS][4];
-    lsquic_stream_id_t          ifc_max_req_id;
+    lsquic_stream_id_t          ifc_max_req_id; /* 记录由对端发起的双向流最大流ID */
     struct hcso_writer          ifc_hcso;
     struct http_ctl_stream_in   ifc_hcsi;
     struct qpack_enc_hdl        ifc_qeh;
@@ -471,7 +477,9 @@ struct ietf_full_conn
     /* Last 8 packets had ECN markings? */
     uint8_t                     ifc_incoming_ecn;
     unsigned char               ifc_cur_path_id;    /* Indexes ifc_paths */
+                                                    /* 当前网络路径在ifc_paths中的索引 */
     unsigned char               ifc_used_paths;     /* Bitmask */
+                                                    /* 按位表示ifc_paths中被使用的索引 */
     unsigned char               ifc_mig_path_id;
     /* ifc_active_cids_limit is the maximum number of CIDs at any one time this
      * endpoint is allowed to issue to peer.  If the TP value exceeds cn_n_cces,
@@ -493,7 +501,10 @@ struct ietf_full_conn
     unsigned                    ifc_max_ack_freq_seqno; /* Incoming */
     unsigned short              ifc_max_udp_payload;    /* Cached TP */
     lsquic_time_t               ifc_last_live_update;
-    struct conn_path            ifc_paths[N_PATHS];
+    struct conn_path            ifc_paths[N_PATHS];     /* 记录连接的所有路径地址,
+                                                         * 在握手成功从mini conn转为full conn时,
+                                                         * ifc_paths[0]赋值为ietf_mini_conn->imc_path
+                                                         */
     union {
         struct {
             struct lsquic_stream   *crypto_streams[N_ENC_LEVS];
@@ -994,15 +1005,26 @@ static const struct crypto_stream_if crypto_stream_if =
 static const struct lsquic_stream_if *unicla_if_ptr;
 
 
+/* 生成stream id, stream id是一个62比特的整数, 编码为一个可变长度整型
+ * (可变长度整型编码使用首个字节最高的两个有效位, 用来存储正在编码的整型值
+ *  的字节长度的以2为底的对数值, 比如stream id的前两位11即2^3=8字节=64bit)
+ *
+ * 流ID最后两位表示流类型
+ *   - 0x00   客户端创建的双向流
+ *   - 0x01   服务端创建的双向流
+ *   - 0x02   客户端创建的单向流
+ *   - 0x03   服务端创建的单向流
+ * 每种流的每个流ID根据创建顺序依次线性递增
+ */
 static lsquic_stream_id_t
 generate_stream_id (struct ietf_full_conn *conn, enum stream_dir sd)
 {
     lsquic_stream_id_t id;
 
-    id = conn->ifc_n_created_streams[sd]++;
+    id = conn->ifc_n_created_streams[sd]++; /* stream id的前62w位按照创建递增, 双向流和单向流id独立 */
     return id << SIT_SHIFT
-         | sd << SD_SHIFT
-         | !!(conn->ifc_flags & IFC_SERVER)
+         | sd << SD_SHIFT /* 倒数第二位表示流的类型, SD_BIDI(0)为双向流, SD_UNI(1)为单向流 */
+         | !!(conn->ifc_flags & IFC_SERVER) /* 最后一位表示该stream是客户端发起(0)的还是服务器发起的(1) */
         ;
 }
 
@@ -1134,7 +1156,8 @@ create_push_stream (struct ietf_full_conn *conn)
     if (conn->ifc_enpub->enp_settings.es_delay_onclose)
         flags |= SCF_DELAY_ONCLOSE;
 
-    stream_id = generate_stream_id(conn, SD_UNI);
+    stream_id = generate_stream_id(conn, SD_UNI); /* 获取流ID, 使用单向流 */
+    /* 创建流 */
     stream = lsquic_stream_new(stream_id, &conn->ifc_pub,
                 conn->ifc_enpub->enp_stream_if,
                 conn->ifc_enpub->enp_stream_if_ctx,
@@ -1142,6 +1165,7 @@ create_push_stream (struct ietf_full_conn *conn)
                 conn->ifc_cfg.max_stream_send, flags);
     if (!stream)
         return NULL;
+    /* 将流链入哈希表 */
     if (!lsquic_hash_insert(conn->ifc_pub.all_streams, &stream->id,
                             sizeof(stream->id), stream, &stream->sm_hash_el))
     {
@@ -1295,6 +1319,7 @@ ietf_full_conn_init (struct ietf_full_conn *conn,
     lsquic_rechist_init(&conn->ifc_rechist[PNS_INIT], 1, 10);
     lsquic_rechist_init(&conn->ifc_rechist[PNS_HSK], 1, 10);
     lsquic_rechist_init(&conn->ifc_rechist[PNS_APP], 1, 1000);
+    /* 初始化send ctl相关 */
     lsquic_send_ctl_init(&conn->ifc_send_ctl, &conn->ifc_alset, enpub,
         flags & IFC_SERVER ? &server_ver_neg : &conn->ifc_u.cli.ifcli_ver_neg,
         &conn->ifc_pub, SC_IETF|SC_NSTP|(ecn ? SC_ECN : 0));
@@ -1543,6 +1568,7 @@ lsquic_ietf_full_conn_server_new (struct lsquic_engine_public *enpub,
     /* Set the flags early so that correct CID is used for logging */
     conn->ifc_conn.cn_flags |= LSCONN_IETF | LSCONN_SERVER;
 
+    /* 初始化full conn成员 */
     if (0 != ietf_full_conn_init(conn, enpub, flags,
                                         lsquic_mini_conn_ietf_ecn_ok(imc)))
         goto err1;
@@ -1555,6 +1581,7 @@ lsquic_ietf_full_conn_server_new (struct lsquic_engine_public *enpub,
     if (enpub->enp_settings.es_support_srej)
         conn->ifc_send_flags |= SF_SEND_NEW_TOKEN;
 
+    /* ifc_paths[0]赋值为mini conn的imc_path, 即mini的路径 */
     conn->ifc_paths[0].cop_path = imc->imc_path;
     conn->ifc_paths[0].cop_flags = COP_VALIDATED|COP_INITIALIZED|COP_ALLOW_MTU_PADDING;
     conn->ifc_used_paths = 1 << 0;
@@ -2671,6 +2698,7 @@ is_our_stream (const struct ietf_full_conn *conn,
 }
 
 
+/* 返回1说明是由对端发起的流 */
 static int
 is_peer_initiated (const struct ietf_full_conn *conn,
                                                 lsquic_stream_id_t stream_id)
@@ -2769,7 +2797,7 @@ conn_is_stream_closed (struct ietf_full_conn *conn,
 {
     enum stream_id_type idx = stream_id & SIT_MASK;
     stream_id >>= SIT_SHIFT;
-    return lsquic_set64_has(&conn->ifc_closed_stream_ids[idx], stream_id);
+    return lsquic_set64_has(&conn->ifc_closed_stream_ids[idx], stream_id); /* 流ID已经被关闭 */
 }
 
 
@@ -5495,20 +5523,26 @@ new_stream (struct ietf_full_conn *conn, lsquic_stream_id_t stream_id,
 }
 
 
+/* 返回1表示单向流中本方只作为发送方却收到只能由发送方发送的帧,
+ * 比如流帧/阻塞帧/重置帧, 是异常的
+ */
 static int
 conn_is_send_only_stream (const struct ietf_full_conn *conn,
                                                 lsquic_stream_id_t stream_id)
 {
     enum stream_id_type sit;
 
-    sit = stream_id & SIT_MASK;
-    if (conn->ifc_flags & IFC_SERVER)
-        return sit == SIT_UNI_SERVER;
-    else
+    sit = stream_id & SIT_MASK; /* &0x3 获取流类型 */
+    if (conn->ifc_flags & IFC_SERVER) /* 本方是服务端 */
+        return sit == SIT_UNI_SERVER; /* 收到服务端单向流的流帧 为异常 */
+    else /* 本方是客户端, 收到客户端单向流 为异常 */
         return sit == SIT_UNI_CLIENT;
 }
 
 
+/* 返回1表示单向流中本方只作为接收方却收到了只能由接收方发送的帧,
+ * 比如最大流数据帧, 是异常的
+ */
 static int
 conn_is_receive_only_stream (const struct ietf_full_conn *conn,
                                                 lsquic_stream_id_t stream_id)
@@ -5517,8 +5551,8 @@ conn_is_receive_only_stream (const struct ietf_full_conn *conn,
 
     sit = stream_id & SIT_MASK;
     if (conn->ifc_flags & IFC_SERVER)
-        return sit == SIT_UNI_CLIENT;
-    else
+        return sit == SIT_UNI_CLIENT; /* 本方服务端(接收方)收到由对端发起的单向流的帧 为异常 */
+    else /* 本方客户端收到由对端发起的单向流的帧 为异常 */
         return sit == SIT_UNI_SERVER;
 }
 
@@ -5531,6 +5565,7 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
     uint64_t offset, error_code;
     lsquic_stream_t *stream;
     int call_on_new;
+    /* 调用ietf_v1_parse_rst_frame()解析重置帧 */
     const int parsed_len = conn->ifc_conn.cn_pf->pf_parse_rst_frame(p, len,
                                             &stream_id, &offset, &error_code);
     if (parsed_len < 0)
@@ -5541,6 +5576,7 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
     LSQ_DEBUG("Got RST_STREAM; stream: %"PRIu64"; offset: 0x%"PRIX64, stream_id,
                                                                     offset);
 
+    /* 本方开启的单向流但却收到对端的重置帧, 是异常的 */
     if (conn_is_send_only_stream(conn, stream_id))
     {
         ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR,
@@ -5549,22 +5585,24 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
     }
 
     call_on_new = 0;
-    stream = find_stream_by_id(conn, stream_id);
-    if (!stream)
+    stream = find_stream_by_id(conn, stream_id); /* 查找流 */
+    if (!stream) /* 没找到则创建新流(对端可以发送一个流重置帧作为流的首个帧,
+                  * 这会导致该流的发送部分开启然后立即转到'重置发送'状态)
+                  */
     {
         if (conn_is_stream_closed(conn, stream_id))
         {
             LSQ_DEBUG("got reset frame for closed stream %"PRIu64, stream_id);
             return parsed_len;
         }
-        if (!is_peer_initiated(conn, stream_id))
+        if (!is_peer_initiated(conn, stream_id)) /* 如果是本端发起的流则不可能先收到对端的重置帧 */
         {
             ABORT_ERROR("received reset for never-initiated stream %"PRIu64,
                                                                     stream_id);
             return 0;
         }
 
-        stream = new_stream(conn, stream_id, 0);
+        stream = new_stream(conn, stream_id, 0); /* 创建新流 */
         if (!stream)
         {
             ABORT_ERROR("cannot create new stream: %s", strerror(errno));
@@ -5573,7 +5611,7 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
         ++call_on_new;
     }
 
-    if (0 != lsquic_stream_rst_in(stream, offset, error_code))
+    if (0 != lsquic_stream_rst_in(stream, offset, error_code)) /* 处理接收重置帧 */
     {
         ABORT_ERROR("received invalid RST_STREAM");
         return 0;
@@ -5855,6 +5893,7 @@ process_stream_frame (struct ietf_full_conn *conn,
         return 0;
     }
 
+    /* 调用ietf_v1_parse_stream_frame()解析流帧, 字段保存到stream_frame中 */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_stream_frame(p, len,
                                                                 stream_frame);
     if (parsed_len < 0) {
@@ -5863,10 +5902,13 @@ process_stream_frame (struct ietf_full_conn *conn,
                                                 "cannot decode STREAM frame");
         return 0;
     }
+
+    /* 日志和统计 */
     EV_LOG_STREAM_FRAME_IN(LSQUIC_LOG_CONN_ID, stream_frame);
     CONN_STATS(in.stream_frames, 1);
     CONN_STATS(in.stream_data_sz, stream_frame->data_frame.df_size);
 
+    /* 如果由本方开启的单向流但却收到对端的流帧, 说明是异常的 */
     if (conn_is_send_only_stream(conn, stream_frame->stream_id))
     {
         ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR, "received STREAM frame "
@@ -5874,6 +5916,7 @@ process_stream_frame (struct ietf_full_conn *conn,
         return 0;
     }
 
+    /* 如果本端是HTTP客户端, 却收到由服务端发起的双向流帧, 则异常 */
     if ((conn->ifc_flags & (IFC_SERVER|IFC_HTTP)) == IFC_HTTP
                     && SIT_BIDI_SERVER == (stream_frame->stream_id & SIT_MASK))
     {
@@ -5883,6 +5926,7 @@ process_stream_frame (struct ietf_full_conn *conn,
         return 0;
     }
 
+    /* 连接被关闭, 忽略流帧, 不算异常 */
     if (conn->ifc_flags & IFC_CLOSING)
     {
         LSQ_DEBUG("Connection closing: ignore frame");
@@ -5890,9 +5934,11 @@ process_stream_frame (struct ietf_full_conn *conn,
         return parsed_len;
     }
 
+    /* 通过流id在连接中查找流 */
     stream = find_stream_by_id(conn, stream_frame->stream_id);
-    if (!stream)
+    if (!stream) /* 找不到则检查后创建新流 */
     {
+        /* 流ID对应的流已经被关闭, 则忽略流帧 */
         if (conn_is_stream_closed(conn, stream_frame->stream_id))
         {
             LSQ_DEBUG("drop frame for closed stream %"PRIu64,
@@ -5900,8 +5946,9 @@ process_stream_frame (struct ietf_full_conn *conn,
             lsquic_malo_put(stream_frame);
             return parsed_len;
         }
-        if (is_peer_initiated(conn, stream_frame->stream_id))
+        if (is_peer_initiated(conn, stream_frame->stream_id)) /* 由对端发起的流 */
         {
+            /* 不能超过最大允许流id */
             const lsquic_stream_id_t max_allowed =
                 conn->ifc_max_allowed_stream_id[stream_frame->stream_id & SIT_MASK];
             if (stream_frame->stream_id >= max_allowed)
@@ -5912,6 +5959,7 @@ process_stream_frame (struct ietf_full_conn *conn,
                 lsquic_malo_put(stream_frame);
                 return 0;
             }
+            /* 服务要关闭了不允许创建新的流 */
             if (conn->ifc_flags & IFC_GOING_AWAY)
             {
                 LSQ_DEBUG("going away: reject new incoming stream %"PRIu64,
@@ -5922,13 +5970,14 @@ process_stream_frame (struct ietf_full_conn *conn,
                 return parsed_len;
             }
         }
-        else
+        else /* 流不是由对端发起的, 但本端又找不到, 出错 */
         {
             ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR, "received STREAM frame "
                                                 "for never-initiated stream");
             lsquic_malo_put(stream_frame);
             return 0;
         }
+        /* 这里创建新流 */
         stream = new_stream(conn, stream_frame->stream_id, SCF_CALL_ON_NEW);
         if (!stream)
         {
@@ -5936,14 +5985,15 @@ process_stream_frame (struct ietf_full_conn *conn,
             lsquic_malo_put(stream_frame);
             return 0;
         }
-        if (SD_BIDI == ((stream_frame->stream_id >> SD_SHIFT) & 1)
+        /* 更新对端发起的双向流最大流id: conn->ifc_max_req_id */
+        if (SD_BIDI == ((stream_frame->stream_id >> SD_SHIFT) & 1) /* 为双向流 */
                 && (!valid_stream_id(conn->ifc_max_req_id)
                         || conn->ifc_max_req_id < stream_frame->stream_id))
             conn->ifc_max_req_id = stream_frame->stream_id;
     }
 
     stream_frame->packet_in = lsquic_packet_in_get(packet_in);
-    if (0 != lsquic_stream_frame_in(stream, stream_frame))
+    if (0 != lsquic_stream_frame_in(stream, stream_frame)) /* 接收流帧 */
     {
         ABORT_ERROR("cannot insert stream frame");
         return 0;
@@ -5971,11 +6021,14 @@ process_ack_frame (struct ietf_full_conn *conn,
     CONN_STATS(in.n_acks, 1);
 
     if (conn->ifc_flags & IFC_HAVE_SAVED_ACK)
+        /* conn->ifc_ack已经缓存了ACK帧信息, 先放到conn->ifc_pub.mm->acki解析
+         * 下面会尝试和conn->ifc_ack中的ack块合并, 合并失败则先处理ifc_ack然后覆盖它
+         */
         new_acki = conn->ifc_pub.mm->acki;
     else /* 还未缓存ACK */
         new_acki = &conn->ifc_ack;
 
-    /* 解析ACK帧, 信息存入new_acki中 */
+    /* 解析ACK帧,调用ietf_v1_parse_ack_frame(), 信息存入new_acki中 */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_ack_frame(p, len, new_acki,
                                                         conn->ifc_cfg.ack_exp);
     if (parsed_len < 0)
@@ -5992,7 +6045,10 @@ process_ack_frame (struct ietf_full_conn *conn,
      > received ACK frame.  Verifying based on ACK frames that arrive out of
      > order can result in disabling ECN unnecessarily.
      */
-    pns = lsquic_hety2pns[ packet_in->pi_header_type ];
+    pns = lsquic_hety2pns[ packet_in->pi_header_type ]; /* 得到包空间 */
+    /* 乱序的ACK帧是直接被丢弃的, 只处理最新的ACK帧: ACK帧的包号比之前的大,
+     * 原因看上面这段注释: 处理乱序的ACK帧可能会导致错误禁用ECN
+     */
     if (is_valid_packno(conn->ifc_max_ack_packno[pns]) &&
                         packet_in->pi_packno <= conn->ifc_max_ack_packno[pns])
     {
@@ -6002,14 +6058,14 @@ process_ack_frame (struct ietf_full_conn *conn,
     }
 
     EV_LOG_ACK_FRAME_IN(LSQUIC_LOG_CONN_ID, new_acki);
-    conn->ifc_max_ack_packno[pns] = packet_in->pi_packno;
+    conn->ifc_max_ack_packno[pns] = packet_in->pi_packno; /* 保存当前收到的ACK帧包号 */
     new_acki->pns = pns;
 
     ++conn->ifc_pts.n_acks;
 
     /* Only cache ACKs for PNS_APP */
     if (pns == PNS_APP && new_acki == &conn->ifc_ack)
-    { /* 当前还没保存缓存的ACK帧, 设置缓存标志和记录收到ACK的时间, 等tick里处理 */
+    { /* 当前还没保存缓存的ACK帧, 设置缓存标志和记录收到ACK的时间, 等tick里处理: ietf_full_conn_ci_tick() */
         LSQ_DEBUG("Saved ACK");
         conn->ifc_flags |= IFC_HAVE_SAVED_ACK;
         conn->ifc_saved_ack_received = packet_in->pi_received;
@@ -6153,6 +6209,9 @@ process_max_data_frame (struct ietf_full_conn *conn,
     uint64_t max_data;
     int parsed_len;
 
+    /* 调用ietf_v1_parse_max_data()解析最大数据量帧(连接级别),
+     * 最大数据量保存在max_data
+     */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_max_data(p, len, &max_data);
     if (parsed_len < 0)
         return 0;
@@ -6163,7 +6222,7 @@ process_max_data_frame (struct ietf_full_conn *conn,
     {
         LSQ_DEBUG("max data goes from %"PRIu64" to %"PRIu64,
                                 conn->ifc_pub.conn_cap.cc_max, max_data);
-        conn->ifc_pub.conn_cap.cc_max = max_data;
+        conn->ifc_pub.conn_cap.cc_max = max_data; /* 保存连接最大数据量 */
     }
     else
         LSQ_DEBUG("newly supplied max data=%"PRIu64" is not larger than the "
@@ -6182,6 +6241,9 @@ process_max_stream_data_frame (struct ietf_full_conn *conn,
     uint64_t max_data;
     int parsed_len;
 
+    /* 调用ietf_v1_parse_max_stream_data_frame()解析最大流数据量帧,
+     * 流ID保存在stream_id, 最大流数据量保存在max_data中
+     */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_max_stream_data_frame(p, len,
                                                             &stream_id, &max_data);
     if (parsed_len < 0)
@@ -6189,6 +6251,8 @@ process_max_stream_data_frame (struct ietf_full_conn *conn,
 
     EV_LOG_CONN_EVENT(LSQUIC_LOG_CONN_ID, "RX MAX_STREAM_DATA frame; "
         "stream_id: %"PRIu64"; offset: %"PRIu64, stream_id, max_data);
+
+    /* 单向流中本方只作为接收方却收到了只能由接收方发送的帧, 异常*/
     if (conn_is_receive_only_stream(conn, stream_id))
     {
         ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR,
@@ -6198,7 +6262,7 @@ process_max_stream_data_frame (struct ietf_full_conn *conn,
 
     stream = find_stream_by_id(conn, stream_id);
     if (stream)
-        lsquic_stream_window_update(stream, max_data);
+        lsquic_stream_window_update(stream, max_data); /* 更新流最大数据量 */
     else if (conn_is_stream_closed(conn, stream_id))
         LSQ_DEBUG("stream %"PRIu64" is closed: ignore MAX_STREAM_DATA frame",
                                                                     stream_id);
@@ -6223,12 +6287,15 @@ process_max_streams_frame (struct ietf_full_conn *conn,
     uint64_t max_streams;
     int parsed_len;
 
+    /* 调用ietf_v1_parse_max_streams_frame()解析最大流帧
+     * 流类型保存在sd中, 最大流数保存在max_streams中
+     */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_max_streams_frame(p, len,
                                                             &sd, &max_streams);
     if (parsed_len < 0)
         return 0;
 
-    sit = gen_sit(conn->ifc_flags & IFC_SERVER, sd);
+    sit = gen_sit(conn->ifc_flags & IFC_SERVER, sd); /* 生成stream id的最后2bit表示类型 */
     max_stream_id = max_streams << SIT_SHIFT;
 
     if (max_stream_id > VINT_MAX_VALUE)
@@ -6244,9 +6311,9 @@ process_max_streams_frame (struct ietf_full_conn *conn,
         LSQ_DEBUG("max %s stream ID updated from %"PRIu64" to %"PRIu64,
             sd == SD_BIDI ? "bidi" : "uni",
             conn->ifc_max_allowed_stream_id[sit], max_stream_id);
-        conn->ifc_max_allowed_stream_id[sit] = max_stream_id;
+        conn->ifc_max_allowed_stream_id[sit] = max_stream_id; /* 更新变大的最大流数 */
     }
-    else
+    else /* 忽略变小的值 */
         LSQ_DEBUG("ignore old max %s streams value of %"PRIu64,
             sd == SD_BIDI ? "bidi" : "uni", max_streams);
 
@@ -6586,6 +6653,7 @@ process_new_token_frame (struct ietf_full_conn *conn,
 }
 
 
+/* 处理流数据阻塞帧 QUIC_FRAME_STREAM_BLOCKED, 是由发送端受到流级流控无法发送数据时发送的 */
 static unsigned
 process_stream_blocked_frame (struct ietf_full_conn *conn,
         struct lsquic_packet_in *packet_in, const unsigned char *p, size_t len)
@@ -6595,6 +6663,10 @@ process_stream_blocked_frame (struct ietf_full_conn *conn,
     uint64_t peer_off;
     int parsed_len;
 
+    /* 调用ietf_v1_parse_stream_blocked_frame()解析流数据阻塞帧,
+     * 流ID保存在stream_id中,
+     * 最大流数据量保存在peer_off中, 表示阻塞发生时流的偏移量
+     */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_stream_blocked_frame(p,
                                                 len, &stream_id, &peer_off);
     if (parsed_len < 0)
@@ -6605,6 +6677,7 @@ process_stream_blocked_frame (struct ietf_full_conn *conn,
     LSQ_DEBUG("received STREAM_BLOCKED frame: stream %"PRIu64
                                     "; offset %"PRIu64, stream_id, peer_off);
 
+    /* 本方开启的单向流但却收到对端的流数据阻塞帧, 是异常的 */
     if (conn_is_send_only_stream(conn, stream_id))
     {
         ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR,
@@ -6613,9 +6686,9 @@ process_stream_blocked_frame (struct ietf_full_conn *conn,
         return 0;
     }
 
-    stream = find_stream_by_id(conn, stream_id);
+    stream = find_stream_by_id(conn, stream_id); /* 查找流 */
     if (stream)
-        lsquic_stream_peer_blocked(stream, peer_off);
+        lsquic_stream_peer_blocked(stream, peer_off); /* 处理流数据阻塞帧 */
     else
         LSQ_DEBUG("stream %"PRIu64" not found - ignore STREAM_BLOCKED frame",
             stream_id);
@@ -6632,6 +6705,9 @@ process_streams_blocked_frame (struct ietf_full_conn *conn,
     enum stream_dir sd;
     int parsed_len;
 
+    /* 调用ietf_v1_parse_streams_blocked_frame()解析流阻塞帧
+     * 流类型保存在sd中, 最大流数保存在stream_limit中
+     */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_streams_blocked_frame(p,
                                                 len, &sd, &stream_limit);
     if (parsed_len < 0)
@@ -6650,6 +6726,7 @@ process_streams_blocked_frame (struct ietf_full_conn *conn,
         " %sdirectional stream%.*s", stream_limit, sd == SD_UNI ? "uni" : "bi",
         stream_limit != 1, "s");
     /* We don't do anything with this information -- at least for now */
+    /* 当前收到流阻塞帧没有任何处理 */
     return parsed_len;
 }
 
@@ -6835,6 +6912,7 @@ typedef unsigned (*process_frame_f)(
     const unsigned char *p, size_t);
 
 
+/* 帧类型处理函数集合 */
 static process_frame_f const process_frames[N_QUIC_FRAMES] =
 {
     [QUIC_FRAME_PADDING]            =  process_padding_frame,
@@ -6872,13 +6950,15 @@ process_packet_frame (struct ietf_full_conn *conn,
     char str[8 * 2 + 1];
 
     enc_level = lsquic_packet_in_enc_level(packet_in);
+    /* 从首个字节获取帧类型, iquic调用ietf_v1_parse_frame_type() */
     type = conn->ifc_conn.cn_pf->pf_parse_frame_type(p, len);
+    /* 根据quic各种版本和等级来确定是否处理该类型的帧 */
     if (lsquic_legal_frames_by_level[conn->ifc_conn.cn_version][enc_level]
                                                                 & (1 << type))
     {
         LSQ_DEBUG("about to process %s frame", frame_type_2_str[type]);
         packet_in->pi_frame_types |= 1 << type;
-        return process_frames[type](conn, packet_in, p, len);
+        return process_frames[type](conn, packet_in, p, len); /* 调用对应帧处理函数 */
     }
     else
     {
@@ -7034,12 +7114,13 @@ parse_regular_packet (struct ietf_full_conn *conn,
     const unsigned char *p, *pend;
     unsigned len;
 
-    p = packet_in->pi_data + packet_in->pi_header_sz;
+    p = packet_in->pi_data + packet_in->pi_header_sz;   /* 帧起始数据 */
     pend = packet_in->pi_data + packet_in->pi_data_sz;
 
     if (p < pend)
-        do
+        do /* 循环处理帧 */
         {
+            /* 处理帧, 返回被处理的长度, 返回0说明出错 */
             len = process_packet_frame(conn, packet_in, p, pend - p);
             if (len > 0)
                 p += len;
@@ -7443,7 +7524,7 @@ process_regular_packet (struct ietf_full_conn *conn,
 
     CONN_STATS(in.packets, 1);
 
-    pns = lsquic_hety2pns[ packet_in->pi_header_type ];
+    pns = lsquic_hety2pns[ packet_in->pi_header_type ]; /* 获取包空间 */
     if ((pns == PNS_INIT && (conn->ifc_flags & IFC_IGNORE_INIT))
                     || (pns == PNS_HSK  && (conn->ifc_flags & IFC_IGNORE_HSK)))
     {
@@ -7459,6 +7540,7 @@ process_regular_packet (struct ietf_full_conn *conn,
      * MUST discard these packets.
      *      [draft-ietf-quic-transport-20], Section 9
      */
+    /* 客户端需要丢弃未知地址的包 */
     if (packet_in->pi_path_id != conn->ifc_cur_path_id
         && 0 == (conn->ifc_flags & IFC_SERVER)
         && !(packet_in->pi_path_id == conn->ifc_mig_path_id
@@ -7490,6 +7572,7 @@ process_regular_packet (struct ietf_full_conn *conn,
      */
     if (0 == (packet_in->pi_flags & PI_DECRYPTED))
     {
+        /* 对包进行解密(包号也是在这里获取的) */
         dec_packin = conn->ifc_conn.cn_esf_c->esf_decrypt_packet(
                             conn->ifc_conn.cn_enc_session, conn->ifc_enpub,
                             &conn->ifc_conn, packet_in);
@@ -7548,14 +7631,16 @@ process_regular_packet (struct ietf_full_conn *conn,
     EV_LOG_PACKET_IN(LSQUIC_LOG_CONN_ID, packet_in);
 
     is_rechist_empty = lsquic_rechist_is_empty(&conn->ifc_rechist[pns]);
+    /* 检查包号: 合法/非法/重复 */
     st = lsquic_rechist_received(&conn->ifc_rechist[pns], packet_in->pi_packno,
                                                     packet_in->pi_received);
     switch (st) {
-    case REC_ST_OK:
+    case REC_ST_OK: /* 包号合法 */
+        /* 客户端记录源CID */
         if (!(conn->ifc_flags & (IFC_SERVER|IFC_DCID_SET)))
             record_dcid(conn, packet_in);
         saved_path_id = conn->ifc_cur_path_id;
-        parse_regular_packet(conn, packet_in);
+        parse_regular_packet(conn, packet_in); /* 处理包中的帧 */
         if (saved_path_id == conn->ifc_cur_path_id)
         {
             if (conn->ifc_cur_path_id != packet_in->pi_path_id)
@@ -7663,7 +7748,7 @@ process_regular_packet (struct ietf_full_conn *conn,
             lsquic_send_ctl_path_validated(&conn->ifc_send_ctl);
         }
         return 0;
-    case REC_ST_DUP:
+    case REC_ST_DUP: /* 包号重复了 */
         CONN_STATS(in.dup_packets, 1);
         LSQ_INFO("packet %"PRIu64" is a duplicate", packet_in->pi_packno);
         return 0;
@@ -7859,6 +7944,7 @@ ietf_full_conn_ci_packet_in (struct lsquic_conn *lconn,
     set_earliest_idle_alarm(conn, conn->ifc_idle_to
                     ? packet_in->pi_received + conn->ifc_idle_to : 0);
     if (0 == (conn->ifc_flags & IFC_IMMEDIATE_CLOSE_FLAGS))
+        /* iquic服务端调用process_incoming_packet_fast() */
         if (0 != conn->ifc_process_incoming_packet(conn, packet_in))
             conn->ifc_flags |= IFC_ERROR;
 }
@@ -8893,6 +8979,7 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
     struct conn_path *copath, *first_unused, *first_unvalidated, *first_other,
                                                                         *victim;
 
+    /* 优先比较当前ifc_cur_path_id是否匹配, 匹配则返回 */
     path = &conn->ifc_paths[conn->ifc_cur_path_id].cop_path;
     if (path_matches(path, local_sa, peer_sa))
     {
@@ -8903,11 +8990,13 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
     first_unvalidated = NULL;
     first_unused = NULL;
     first_other = NULL;
+    /* 接下来比较在ifc_paths中所有地址 */
     for (copath = conn->ifc_paths; copath < conn->ifc_paths
             + sizeof(conn->ifc_paths) / sizeof(conn->ifc_paths[0]); ++copath)
     {
-        if (conn->ifc_used_paths & (1 << (copath - conn->ifc_paths)))
+        if (conn->ifc_used_paths & (1 << (copath - conn->ifc_paths))) /* ifc_paths已经被使用的 */
         {
+            /* 地址匹配, 直接返回该地址在ifc_paths中的索引id */
             if (path_matches(&copath->cop_path, local_sa, peer_sa))
             {
                 copath->cop_path.np_peer_ctx = peer_ctx;
@@ -8919,13 +9008,17 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
             else if (!first_other)
                 first_other = copath;
         }
-        else if (!first_unused)
+        else if (!first_unused) /* 记录ifc_paths中首个未使用的索引 */
             first_unused = copath;
     }
+    /* 未在ifc_paths中找到该地址, 下面需要记录 */
 
-    if (first_unused)
+    /* ifc_paths中还有未使用的, 优先使用
+     * 将包中的地址记录到first_unused指向的ifc_paths中, 返回该索引
+     */
+    if (first_unused) 
     {
-        record_to_path(conn, first_unused, peer_ctx, local_sa, peer_sa);
+        record_to_path(conn, first_unused, peer_ctx, local_sa, peer_sa); /* 记录 */
         if (0 == conn->ifc_used_paths && !(conn->ifc_flags & IFC_SERVER))
         {
             /* First path is considered valid immediately */
@@ -8934,10 +9027,11 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
         }
         LSQ_DEBUG("record new path ID %d",
                                     (int) (first_unused - conn->ifc_paths));
-        conn->ifc_used_paths |= 1 << (first_unused - conn->ifc_paths);
+        conn->ifc_used_paths |= 1 << (first_unused - conn->ifc_paths); /* 记录被使用的bit */
         return first_unused - conn->ifc_paths;
     }
 
+    /* 接下来优先记录到first_unvalidated, 然后是first_other中 */
     if (first_unvalidated || first_other)
     {
         victim = first_unvalidated ? first_unvalidated : first_other;
@@ -9062,7 +9156,7 @@ ietf_full_conn_ci_log_stats (struct lsquic_conn *lconn)
     .ci_write_ack            =  ietf_full_conn_ci_write_ack
 
 static const struct conn_iface ietf_full_conn_iface = {
-    IETF_FULL_CONN_FUNCS,
+    IETF_FULL_CONN_FUNCS,   /* 上面那一大把函数 */
     .ci_next_packet_to_send =  ietf_full_conn_ci_next_packet_to_send,
     .ci_packet_not_sent     =  ietf_full_conn_ci_packet_not_sent,
     .ci_packet_sent         =  ietf_full_conn_ci_packet_sent,

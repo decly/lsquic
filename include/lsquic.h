@@ -833,7 +833,7 @@ struct lsquic_engine_settings {
      *
      * Default value is @ref LSQUIC_DF_SCID_LEN.
      */
-    unsigned        es_scid_len;
+    unsigned        es_scid_len;    /* iquic中cid的长度, 默认8字节, 最大20字节 */
 
     /**
      * Source Connection ID issuance rate.  Only applicable to the IETF QUIC

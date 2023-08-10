@@ -511,6 +511,9 @@ static int
 is_first_packet_ok (const struct lsquic_packet_in *packet_in,
                                                     size_t udp_payload_size)
 {
+    /* 客户端必须确保包含Initial包的UDP报文具有至少1200字节的UDP负载,
+     * 不够则需要添加PADDING帧
+     */
     if (udp_payload_size < IQUIC_MIN_INIT_PACKET_SZ)
     {
         /* [draft-ietf-quic-transport-24] Section 14 */
@@ -546,6 +549,7 @@ lsquic_mini_conn_ietf_new (struct lsquic_engine_public *enpub,
     const struct enc_session_funcs_iquic *esfi;
     unsigned char rand_nybble;
 
+    /* 初始数据包不够1200字节, 丢弃 */
     if (!is_first_packet_ok(packet_in, udp_payload_size))
         return NULL;
     packet_in->pi_flags |= PI_FIRST_INIT;
@@ -564,13 +568,14 @@ lsquic_mini_conn_ietf_new (struct lsquic_engine_public *enpub,
     conn->imc_cces[0].cce_cid = packet_in->pi_dcid;
     conn->imc_cces[0].cce_flags = CCE_USED;
     conn->imc_conn.cn_cces_mask = 1;
-    lsquic_scid_from_packet_in(packet_in, &conn->imc_path.np_dcid);
+    lsquic_scid_from_packet_in(packet_in, &conn->imc_path.np_dcid); /* 保存对端的cid(即包里的scid) */
     LSQ_DEBUGC("recv SCID from client %"CID_FMT, CID_BITS(&conn->imc_cces[0].cce_cid));
     LSQ_DEBUGC("recv DCID from client %"CID_FMT, CID_BITS(&conn->imc_path.np_dcid));
 
     /* Generate new SCID. Since is not the original SCID, it is given
      * a sequence number (0) and therefore can be retired by the client.
      */
+    /*  默认调用lsquic_generate_scid()生成随机的scid, 除非使用方自己指定生成cid的函数 */
     enpub->enp_generate_scid(enpub->enp_gen_scid_ctx, &conn->imc_conn,
         &conn->imc_conn.cn_cces[1].cce_cid, enpub->enp_settings.es_scid_len);
 
@@ -626,6 +631,7 @@ lsquic_mini_conn_ietf_new (struct lsquic_engine_public *enpub,
     conn->imc_enpub = enpub;
     conn->imc_expire = packet_in->pi_received +
                             enpub->enp_settings.es_handshake_to;
+    /* 设置默认MSS, ipv4 1252, ipv6 1232 */
     if (enpub->enp_settings.es_base_plpmtu)
         conn->imc_path.np_pack_size = enpub->enp_settings.es_base_plpmtu;
     else if (is_ipv4)
