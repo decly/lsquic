@@ -15,7 +15,9 @@ struct packin_parse_state;
 
 struct packin_parse_state {
     const unsigned char     *pps_p;      /* Pointer to packet number */
+                                         /* 指向数据包中数据包号长度的位置 */
     unsigned                 pps_nbytes; /* Number of bytes in packet number */
+                                         /* 数据包号长度 */
 };
 
 int

@@ -16,7 +16,7 @@ struct lsquic_conn;
 struct attq_elem
 {
     struct lsquic_conn  *ae_conn;
-    lsquic_time_t        ae_adv_time;
+    lsquic_time_t        ae_adv_time;	/* 到期时间 */
     unsigned             ae_heap_idx;
     /* The "why" describes why the connection is in the Advisory Tick Time
      * Queue.  Values past the range describe different alarm types (see

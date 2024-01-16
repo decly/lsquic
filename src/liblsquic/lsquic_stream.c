@@ -373,6 +373,7 @@ stream_get_packet_for_stream_0rtt (struct lsquic_send_ctl *ctl,
 {
     struct lsquic_packet_out *packet_out;
 
+    /* 已经握手完成了, 赋值为lsquic_send_ctl_get_packet_for_stream */
     if (stream->conn_pub->lconn->cn_flags & LSCONN_HANDSHAKE_DONE)
     {
         LSQ_DEBUG("switch to regular \"get packet for stream\" function");
@@ -389,7 +390,7 @@ stream_get_packet_for_stream_0rtt (struct lsquic_send_ctl *ctl,
         packet_out = lsquic_send_ctl_get_packet_for_stream(ctl, need_at_least,
                                                             path, stream);
         if (packet_out)
-            packet_out->po_header_type = HETY_0RTT;
+            packet_out->po_header_type = HETY_0RTT; /* 0-RTT类型 */
         return packet_out;
     }
 }
@@ -443,6 +444,7 @@ lsquic_stream_new (lsquic_stream_id_t id,
     lsquic_cfcw_t *cfcw;
     lsquic_stream_t *stream;
 
+    /* 创建一个新的流对象 */
     stream = stream_new_common(id, conn_pub, stream_if, stream_if_ctx,
                                                                 ctor_flags);
     if (!stream)
@@ -451,7 +453,7 @@ lsquic_stream_new (lsquic_stream_id_t id,
     if (!initial_window)
         initial_window = 16 * 1024;
 
-    if (ctor_flags & SCF_IETF)
+    if (ctor_flags & SCF_IETF) /* 如果是IETF协议(iquic) */
     {
         cfcw = &conn_pub->cfcw;
         stream->sm_bflags |= SMBF_CONN_LIMITED;
@@ -502,6 +504,7 @@ lsquic_stream_new (lsquic_stream_id_t id,
         }
     }
 
+    /* 如果是iquic的客户端流且TLS握手未完成 */
     if ((stream->sm_bflags & (SMBF_SERVER|SMBF_IETF)) == SMBF_IETF
                     && !(conn_pub->lconn->cn_flags & LSCONN_HANDSHAKE_DONE))
     {
@@ -1382,12 +1385,14 @@ lsquic_stream_peer_blocked (struct lsquic_stream *stream, uint64_t peer_off)
     LSQ_DEBUG("Peer blocked at %"PRIu64", while the last MAX_STREAM_DATA "
         "frame we sent advertized the limit of %"PRIu64, peer_off, last_off);
 
+    /* peer_off为对端阻塞时的偏移量, 比当前接收偏移量大说明是新的 */
     if (peer_off > last_off && !(stream->sm_qflags & SMQF_SEND_WUF))
     {
+        /* 将流加入连接的待发送帧队列 */
         if (!(stream->sm_qflags & SMQF_SENDING_FLAGS))
             TAILQ_INSERT_TAIL(&stream->conn_pub->sending_streams, stream,
                                                     next_send_stream);
-        stream->sm_qflags |= SMQF_SEND_WUF;
+        stream->sm_qflags |= SMQF_SEND_WUF; /* 该发送窗口更新帧 */
         LSQ_DEBUG("marked to send MAX_STREAM_DATA frame");
     }
     else if (stream->sm_qflags & SMQF_SEND_WUF)
@@ -3212,6 +3217,7 @@ stream_write_to_packet_std (struct frame_gen_ctx *fg_ctx, const size_t size)
     struct lsquic_stream *headers_stream;
     int len;
 
+    /* 如果头部还未刷新, 则刷新头部 */
     if ((stream->stream_flags & (STREAM_HEADERS_SENT|STREAM_HDRS_FLUSHED))
                                                         == STREAM_HEADERS_SENT)
     {
@@ -3225,6 +3231,7 @@ stream_write_to_packet_std (struct frame_gen_ctx *fg_ctx, const size_t size)
         else
             headers_stream =
                 lsquic_headers_stream_get_stream(stream->conn_pub->u.gquic.hs);
+        /* 如果头部流中还有数据需要刷新，则刷新头部流 */
         if (headers_stream && lsquic_stream_has_data_to_flush(headers_stream))
         {
             LSQ_DEBUG("flushing headers stream before packetizing stream data");
@@ -3233,11 +3240,13 @@ stream_write_to_packet_std (struct frame_gen_ctx *fg_ctx, const size_t size)
         /* If there is nothing to flush, some other stream must have flushed it:
          * this means our headers are flushed.  Either way, only do this once.
          */
-        stream->stream_flags |= STREAM_HDRS_FLUSHED;
+        stream->stream_flags |= STREAM_HDRS_FLUSHED; /* 设置FLUSHED标志 */
     }
 
+    /* 计算流数据帧的首部大小 */
     stream_header_sz = stream->sm_frame_header_sz(stream, size);
     need_at_least = stream_header_sz;
+    /*  如果使用IETF QUIC协议且需要使用HTTP/3头部帧, 则需要额外的3个字节 */
     if ((stream->sm_bflags & (SMBF_IETF|SMBF_USE_HEADERS))
                                        == (SMBF_IETF|SMBF_USE_HEADERS))
     {
@@ -3246,16 +3255,17 @@ stream_write_to_packet_std (struct frame_gen_ctx *fg_ctx, const size_t size)
     }
     else
         need_at_least += size > 0;
-  get_packet:
+  get_packet: /* 获取一个可用的数据包, 正常调用lsquic_send_ctl_get_packet_for_stream() */
     packet_out = stream->sm_get_packet_for_stream(send_ctl,
                                 need_at_least, stream->conn_pub->path, stream);
     if (packet_out)
     {
-        len = write_stream_frame(fg_ctx, size, packet_out);
+        len = write_stream_frame(fg_ctx, size, packet_out); /* 将流数据帧写入数据包中 */
         if (len > 0)
             return SWTP_OK;
         if (len == 0)
             return SWTP_STOP;
+        /* 如果需要的空间比初始计算的空间还要大，则需要重新获取数据包 */
         if (-len > (int) need_at_least)
         {
             LSQ_DEBUG("need more room (%d bytes) than initially calculated "
@@ -3437,6 +3447,7 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
                           ? size >= fg_ctx.fgc_thresh : size > 0)
            || fg_ctx.fgc_fin(&fg_ctx))
     {
+        /* iquic中初始化为stream_write_to_packet_std() */
         switch (stream->sm_write_to_packet(&fg_ctx, size))
         {
         case SWTP_OK:
@@ -3674,7 +3685,7 @@ stream_write (lsquic_stream_t *stream, struct lsquic_reader *reader,
     size_t thresh, len, frames, total_len, n_allowed, nwritten;
     ssize_t nw;
 
-    len = reader->lsqr_size(reader->lsqr_ctx);
+    len = reader->lsqr_size(reader->lsqr_ctx); /* 总共要写的字节数 */
     if (len == 0)
         return 0;
 
@@ -3687,6 +3698,9 @@ stream_write (lsquic_stream_t *stream, struct lsquic_reader *reader,
     total_len = len + frames + stream->sm_n_buffered;
     thresh = lsquic_stream_flush_threshold(stream, total_len);
     n_allowed = stream_get_n_allowed(stream);
+    /* 如果数据总长度小于等于当前流的可写入长度和流的刷新阈值,
+     * 那么就可以先将数据缓存起来, 原因是为了减少写入数据包的次数
+     */
     if (total_len <= n_allowed && total_len < thresh)
     {
         if (!(swo & SWO_BUFFER))
@@ -3705,7 +3719,7 @@ stream_write (lsquic_stream_t *stream, struct lsquic_reader *reader,
         while (nwritten < len
                         && stream->sm_n_buffered < stream->sm_n_allocated);
     }
-    else
+    else /* 否则就需要将数据写入数据包中 */
         nwritten = stream_write_to_packets(stream, reader, thresh, swo);
     if ((stream->sm_qflags & SMQF_SEND_BLOCKED) &&
         (stream->sm_bflags & SMBF_IETF))

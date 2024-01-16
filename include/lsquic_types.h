@@ -24,11 +24,11 @@
 /**
  * Connection ID
  */
-typedef struct lsquic_cid
+typedef struct lsquic_cid /* 表示连接ID */
 {
     uint8_t     buf[MAX_CID_LEN];
 #define idbuf buf
-    uint_fast8_t len;
+    uint_fast8_t len; /* cid的长度 */
 } ALIGNED_(8)
 lsquic_cid_t;
 

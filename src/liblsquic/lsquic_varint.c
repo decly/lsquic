@@ -13,6 +13,7 @@
 /* Returns number of bytes read from p (1, 2, 4, or 8), or a negative
  * value on error.
  */
+/* 解析可变长整型值(网络字节序), 值保存在valp中, 返回长度(字节) */
 int
 lsquic_varint_read (const unsigned char *p, const unsigned char *end,
                                                             uint64_t *valp)
@@ -22,12 +23,12 @@ lsquic_varint_read (const unsigned char *p, const unsigned char *end,
     if (p >= end)
         return -1;
 
-    switch (*p >> 6)
+    switch (*p >> 6) /* 可变长度整型值的前两个bit表示2^n字节长度 */
     {
-    case 0:
+    case 0: /* 长度1字节(前两bit为0) */
         *valp = *p;
         return 1;
-    case 1:
+    case 1: /* 长度2(2^1)字节, 屏蔽掉前两bit */
         if (p + 1 >= end)
             return -1;
         *valp = (p[0] & VINT_MASK) << 8
@@ -43,7 +44,7 @@ lsquic_varint_read (const unsigned char *p, const unsigned char *end,
               |  p[3] << 0
               ;
         return 4;
-    default:
+    default: /* 长度8字节 */
         if (p + 7 >= end)
             return -1;
         memcpy(&val, p, 8);

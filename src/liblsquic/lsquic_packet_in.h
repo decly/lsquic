@@ -13,15 +13,15 @@ struct lsquic_cid;
 
 struct data_frame
 {
-    const unsigned char *df_data;       /* Pointer to data */
-    uint64_t             df_offset;     /* Stream offset */
+    const unsigned char *df_data;       /* Pointer to data *//* 指向数据部分 */
+    uint64_t             df_offset;     /* Stream offset *//* 偏移(0x04位) */
     uint16_t             df_read_off;   /* Read offset */
-    uint16_t             df_size;       /* Size of df_data */
-    signed char          df_fin;        /* FIN? */
+    uint16_t             df_size;       /* Size of df_data *//* 数据长度(0x02位) */
+    signed char          df_fin;        /* FIN? *//* FIN标志(0x01位) */
 };
 
 
-typedef struct stream_frame
+typedef struct stream_frame /* 表示一个流帧(QUIC_FRAME_STREAM) */
 {
     /* Stream frames are stored in a list inside "di nocopy" (if "di nocopy"
      * is used).
@@ -32,11 +32,11 @@ typedef struct stream_frame
      * packet object is reference-counted.  When the frame is freed, the
      * packet is released via lsquic_packet_in_put().
      */
-    struct lsquic_packet_in        *packet_in;
+    struct lsquic_packet_in        *packet_in;  /* 指向收到流帧对应的包 */
 
-    struct data_frame               data_frame;
+    struct data_frame               data_frame; /* 保留从流帧解析的各字段 */
 
-    lsquic_stream_id_t stream_id;     /* Parsed from packet */
+    lsquic_stream_id_t stream_id;     /* Parsed from packet *//* 流帧中的流id */
 } stream_frame_t;
 
 
@@ -47,16 +47,16 @@ typedef struct stream_frame
 #define DF_END(frame) (DF_OFF(frame) + DF_SIZE(frame))
 
 
-typedef struct lsquic_packet_in
+typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_packet_in) */
 {
     TAILQ_ENTRY(lsquic_packet_in)   pi_next;
-    lsquic_time_t                   pi_received;   /* Time received */
-    lsquic_cid_t                    pi_dcid;
+    lsquic_time_t                   pi_received;   /* Time received *//* 包的接收时间 */
+    lsquic_cid_t                    pi_dcid;       /* 目的cid */
 #define pi_conn_id pi_dcid
     lsquic_packno_t                 pi_packno;
     enum quic_ft_bit                pi_frame_types;
-    unsigned short                  pi_header_sz;  /* Points to payload */
-    unsigned short                  pi_data_sz;    /* Data plus header */
+    unsigned short                  pi_header_sz;  /* Points to payload *//* 包头大小 */
+    unsigned short                  pi_data_sz;    /* Data plus header *//* 包大小 */
     /* A packet may be referred to by one or more frames and packets_in
      * list.
      */
@@ -69,12 +69,13 @@ typedef struct lsquic_packet_in
         PI_DECRYPTED    = (1 << 0),
         PI_OWN_DATA     = (1 << 1),                /* We own pi_data */
         PI_CONN_ID      = (1 << 2),                /* pi_conn_id is set */
+                                                   /* 表示获取了目的cid(pi_dcid) */
         PI_HSK_STREAM   = (1 << 3),                /* Has handshake data (mini only) */
         PI_FROM_MINI    = (1 << 4),                /* Handed off by mini connection */
 #define PIBIT_ENC_LEV_SHIFT 5
         PI_ENC_LEV_BIT_0= (1 << 5),                /* Encodes encryption level */
         PI_ENC_LEV_BIT_1= (1 << 6),                /*  (see enum enc_level). */
-        PI_GQUIC        = (1 << 7),
+        PI_GQUIC        = (1 << 7),                /* 表示gquic的数据包, 不设置即iquic */
         PI_UNUSED_8     = (1 << 8),                /* <-- hole, reuse me! */
 #define PIBIT_ECN_SHIFT 9
         PI_ECN_BIT_0    = (1 << 9),
@@ -88,8 +89,8 @@ typedef struct lsquic_packet_in
         PI_LOG_QL_BITS  = (1 <<14),
         PI_SQUARE_BIT   = (1 <<15),
         PI_LOSS_BIT     = (1 <<16),
-        PI_VER_PARSED   = (1 <<17),
-        PI_FIRST_INIT   = (1 <<18),
+        PI_VER_PARSED   = (1 <<17),                 /* 解析到quic版本 */
+        PI_FIRST_INIT   = (1 <<18),                 /* 首个初始包 */
     }                               pi_flags;
     /* pi_token and pi_token_size are set in Initial and Retry packets */
     unsigned short                  pi_token_size; /* Size of the token */
@@ -99,16 +100,20 @@ typedef struct lsquic_packet_in
     unsigned char                   pi_odcid;      /* Offset to Original DCID */
     unsigned char                   pi_odcid_len;  /* Size of ODCID */
     unsigned char                   pi_scid_off;   /* Offset to SCID */
+                                                   /* 源cid在数据中的偏移量, 即pi_data + pi_scid_off */
     unsigned char                   pi_scid_len;   /* Size of SCID */
+                                                   /* 源cid的长度, cid的偏移量为pi_scid_off */
     unsigned char                   pi_quic_ver;   /* Offset to QUIC version */
+                                                   /* quic版本在包首部的偏移 */
     unsigned char                   pi_nonce;      /* Offset to nonce */
-    enum header_type                pi_header_type:8;
-    unsigned char                   pi_path_id;
+    enum header_type                pi_header_type:8; /* 长包头数据包类型(短包头初始化0) */
+    unsigned char                   pi_path_id;    /* 该包的网络路径(v4/v6+四元组)对应连接ifc_paths中的索引 */
     unsigned char                   pi_version;    /* parsed enum lsquic_version */
+                                                   /* quic的版本, 值为enum lsquic_version */
     /* If PI_OWN_DATA flag is not set, `pi_data' points to user-supplied
      * packet data, which is NOT TO BE MODIFIED.
      */
-    unsigned char                  *pi_data;
+    unsigned char                  *pi_data;    /* 包的实体数据, 从包首部开始 */
 } lsquic_packet_in_t;
 
 

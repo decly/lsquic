@@ -50,20 +50,23 @@ typedef unsigned char sm_hist_idx_t;
  *  +----------+----------------------------------+
  */
 
-enum stream_id_type
+enum stream_id_type /* 流类型(流id的最后两位) */
 {
     SIT_BIDI_CLIENT,
-    SIT_BIDI_SERVER,
-    SIT_UNI_CLIENT,
+    SIT_BIDI_SERVER,    /* 由服务端发起的双向流 */
+    SIT_UNI_CLIENT,     /* 由客户端发起的单向流 */
     SIT_UNI_SERVER,
     N_SITS
 };
 
-#define SIT_MASK (N_SITS - 1)
+#define SIT_MASK (N_SITS - 1) /* 即0x3 */
 
 #define SIT_SHIFT 2
 #define SD_SHIFT 1
 
+/* SD_BIDI用于双向数据传输，即客户端和服务器都可以发送和接收数据;
+ * SD_UNI用于单向数据传输，即只有一方可以发送数据，而另一方只能接收数据
+ */
 enum stream_dir { SD_BIDI, SD_UNI, N_SDS };
 
 
@@ -180,12 +183,15 @@ enum stream_b_flags
 {
     SMBF_SERVER       = 1 << 0,
     SMBF_IETF         = 1 << 1,
-    SMBF_USE_HEADERS  = 1 << 2,
+    SMBF_USE_HEADERS  = 1 << 2,  /* 表示该流使用了HTTP/3头部帧(HEADERS frame)来传输头部信息 */
     SMBF_CRYPTO       = 1 << 3,  /* Crypto stream: applies to both gQUIC and IETF QUIC */
     SMBF_CRITICAL     = 1 << 4,  /* This is a critical stream */
     SMBF_AUTOSWITCH   = 1 << 5,
     SMBF_RW_ONCE      = 1 << 6,  /* When set, read/write events are dispatched once per call */
-    SMBF_CONN_LIMITED = 1 << 7,
+    SMBF_CONN_LIMITED = 1 << 7,  /* 表示流的发送窗口受到连接流控窗口的限制.
+                                  * 如果流的SMBF_CONN_LIMITED标志被设置，那么流的发送窗口大小
+                                  * 不能超过连接流控窗口大小
+                                  */
     SMBF_HEADERS      = 1 << 8,  /* Headers stream */
     SMBF_VERIFY_CL    = 1 << 9,  /* Verify content-length (stored in sm_cont_len) */
     SMBF_HTTP_PRIO    = 1 <<10,  /* Extensible HTTP Priorities are used */
@@ -207,7 +213,7 @@ enum stream_d_flags
 
 enum stream_flags {
     STREAM_FIN_RECVD    = 1 << 0,   /* Received STREAM frame with FIN bit set */
-    STREAM_RST_RECVD    = 1 << 1,   /* Received RST frame */
+    STREAM_RST_RECVD    = 1 << 1,   /* Received RST frame *//* 该流收到了流重置帧 */
     STREAM_LAST_WRITE_OK= 1 << 2,   /* Used to break out of write event dispatch loop */
     STREAM_U_READ_DONE  = 1 << 3,   /* User is done reading (shutdown was called) */
     STREAM_U_WRITE_DONE = 1 << 4,   /* User is done writing (shutdown was called) */
@@ -247,7 +253,7 @@ enum stream_flags {
 
 struct lsquic_stream
 {
-    struct lsquic_hash_elem         sm_hash_el;
+    struct lsquic_hash_elem         sm_hash_el;     /* 用于将流链入conn->ifc_pub.all_streams哈希表 */
     lsquic_stream_id_t              id;
     enum stream_flags               stream_flags;
     enum stream_b_flags             sm_bflags;
@@ -263,7 +269,9 @@ struct lsquic_stream
 
     uint64_t                        tosend_off;
     uint64_t                        sm_payload;     /* Not counting HQ frames */
-    uint64_t                        max_send_off;
+    uint64_t                        max_send_off;   /* 接收到的最大流数据量, 即QUIC_FRAME_MAX_STREAM_DATA帧携带的值,
+                                                     * 用于流控, 发送时不能操作该值
+                                                     */
     uint64_t                        sm_last_recv_off;
     uint64_t                        error_code;
 
@@ -319,11 +327,15 @@ struct lsquic_stream
     /* A stream may be generating STREAM or CRYPTO frames */
     size_t                        (*sm_frame_header_sz)(
                                         const struct lsquic_stream *, unsigned);
+    /* iquic中初始化为stream_write_to_packet_std() */
     enum swtp_status              (*sm_write_to_packet)(struct frame_gen_ctx *,
                                                 const size_t);
     size_t                        (*sm_write_avail)(struct lsquic_stream *);
     int                           (*sm_readable)(struct lsquic_stream *);
 
+    /* 初始化为lsquic_send_ctl_get_packet_for_stream(),
+     * 如果是iquic的客户端流且TLS未握手完成, 则为stream_get_packet_for_stream_0rtt()
+     */
     struct lsquic_packet_out *    (*sm_get_packet_for_stream)(
                                         struct lsquic_send_ctl *,
                                         unsigned, const struct network_path *,

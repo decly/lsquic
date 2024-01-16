@@ -54,6 +54,7 @@ const char *const lsquic_alid2str[] =
 };
 
 
+/* 处理各超时定时器, 调用回调函数 */
 void
 lsquic_alarmset_ring_expired (lsquic_alarmset_t *alset, lsquic_time_t now)
 {
@@ -63,12 +64,13 @@ lsquic_alarmset_ring_expired (lsquic_alarmset_t *alset, lsquic_time_t now)
     for (al_id = 0, armed_set = alset->as_armed_set;
             al_id < MAX_LSQUIC_ALARMS && armed_set;
                 armed_set &= ~(1 << al_id), ++al_id)
-        if (armed_set & (1 << al_id))
+        if (armed_set & (1 << al_id)) /* 该类定时器有激活才处理 */
         {
-            if (alset->as_expiry[al_id] < now)
+            if (alset->as_expiry[al_id] < now) /* 超时 */
             {
                 alset->as_armed_set &= ~(1 << al_id);
                 LSQ_INFO("ring expired %s alarm", lsquic_alid2str[al_id]);
+                /* 调用定时器回调函数 */
                 alset->as_alarms[al_id].callback(al_id,
                                 alset->as_alarms[al_id].cb_ctx,
                                 alset->as_expiry[al_id], now);
@@ -86,6 +88,7 @@ lsquic_alarmset_mintime (const lsquic_alarmset_t *alset, enum alarm_id *idp)
     if (alset->as_armed_set)
     {
         expiry = UINT64_MAX;
+        /* 获取各类定时器最近的超时时间 */
         for (al_id = 0, ret_id = 0; al_id < MAX_LSQUIC_ALARMS; ++al_id)
             if ((alset->as_armed_set & (1 << al_id))
                                 && alset->as_expiry[al_id] < expiry)

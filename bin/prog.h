@@ -33,10 +33,10 @@ struct prog
 #endif
     int                             prog_use_stock_pmi;
     struct event_base              *prog_eb;
-    struct event                   *prog_timer,
+    struct event                   *prog_timer,		/* 处理函数prog_timer_handler() */
                                    *prog_send,
-                                   *prog_usr1;
-    struct event                   *prog_usr2;
+                                   *prog_usr1;		/* 处理函数prog_usr1_handler() */
+    struct event                   *prog_usr2;		/* 处理函数prog_usr2_handler() */
     struct ssl_ctx_st              *prog_ssl_ctx;
     struct lsquic_hash             *prog_certs;
     struct event                   *prog_event_sni;

@@ -61,7 +61,7 @@ const char *const lsquic_hety2str[] =
 /* [draft-ietf-quic-tls-14], Section 4 */
 const enum packnum_space lsquic_hety2pns[] =
 {
-    [HETY_SHORT]        = PNS_APP,
+    [HETY_SHORT]        = PNS_APP,  /* 短包头默认为APP空间 */
     [HETY_VERNEG]       = 0,
     [HETY_INITIAL]      = PNS_INIT,
     [HETY_RETRY]        = 0,

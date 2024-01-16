@@ -13,23 +13,28 @@
 #endif
 
 /* Structure is exposed to facilitate some manipulations in unit tests. */
-struct rechist_elem {
-    lsquic_packno_t     re_low;
-    unsigned            re_count;
+struct rechist_elem {   /* 代表一个包号区间范围 [re_low, re_low + re_count) */
+    lsquic_packno_t     re_low;     /* 最小包号 */
+    unsigned            re_count;   /* 从re_low起连续的包号个数 */
     unsigned            re_next;    /* UINT_MAX means no next element */
+                                    /* 指向下一个包号区间的rh_elems索引(递减排序) */
 };
 
 
-struct lsquic_rechist {
+struct lsquic_rechist { /* 管理接收到的包号区间 */
     /* elems and masks are allocated in contiguous memory */
-    struct rechist_elem            *rh_elems;
+    struct rechist_elem            *rh_elems;   /* 包号区间数组(链表), 是按照包号递减排序的,
+                                                 * 用数组实现链表: rh_head为首个区间索引,
+                                                 * 然后每个区间的re_next指向下一个区间的索引,
+                                                 * 最后一个的re_next为UINT_MAX
+                                                 */
     uintptr_t                      *rh_masks;
     lsquic_packno_t                 rh_cutoff;
-    lsquic_time_t                   rh_largest_acked_received;
+    lsquic_time_t                   rh_largest_acked_received;  /* 最大包号接收的时间 */
     unsigned                        rh_n_masks;
     unsigned                        rh_n_alloced;
     unsigned                        rh_n_used;
-    unsigned                        rh_head;
+    unsigned                        rh_head;    /* 首个包号区间(最大包号)在rh_elems的数组索引 */
     unsigned                        rh_max_ranges;
     enum {
         RH_CUTOFF_SET   = (1 << 0),
@@ -50,9 +55,9 @@ void
 lsquic_rechist_cleanup (struct lsquic_rechist *);
 
 enum received_st {
-    REC_ST_OK,
-    REC_ST_DUP,
-    REC_ST_ERR,
+    REC_ST_OK,  /* 合法的包号 */
+    REC_ST_DUP, /* 重复的包号 */
+    REC_ST_ERR, /* 非法包号 */
 };
 
 enum received_st

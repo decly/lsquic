@@ -38,9 +38,13 @@ typedef uint64_t packno_set_t;
 struct ietf_mini_conn
 {
     struct lsquic_conn              imc_conn;
-    struct conn_cid_elem            imc_cces[3];
+    struct conn_cid_elem            imc_cces[3]; /* [0]为初始包的dcid(客户端发送的首个初始数据包的
+                                                  * 目标连接ID字段用于确定初始数据包的包保护密钥,
+                                                  * 并非服务端的cid)
+                                                  * [1]为服务端生成的cid(scid), 生成scid函数为lsquic_generate_scid()
+                                                  */
     struct lsquic_engine_public    *imc_enpub;
-    lsquic_time_t                   imc_expire;
+    lsquic_time_t                   imc_expire; /* 握手超时时间, 默认LSQUIC_DF_HANDSHAKE_TO */
     enum {
         IMC_ENC_SESS_INITED     = 1 << 0,
         IMC_QUEUED_ACK_INIT     = 1 << 1,
@@ -116,8 +120,8 @@ struct ietf_mini_conn
 #define IMICO_MAX_STASHED_FRAMES 10u
     unsigned char                   imc_n_crypto_frames;
     unsigned short                  imc_hello_pkt_remain;
-    unsigned char                   imc_long_header_sz;
-    struct network_path             imc_path;
+    unsigned char                   imc_long_header_sz;     /* 长包头的大小 */
+    struct network_path             imc_path;   /* 网络路径, 包括ip地址, mss, 对端cid */
 };
 
 /* [draft-ietf-quic-transport-24] Section 7.4

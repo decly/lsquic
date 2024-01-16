@@ -56,12 +56,13 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
 #endif
     ++pacer->pa_n_scheduled;
 
+    /* 连接一开始或idle restart后前10个包直接发送 */
     if (n_in_flight == 0 && !in_recovery)
     {
         pacer->pa_burst_tokens = 10;
         LSQ_DEBUG("%s: replenish tokens: %u", __func__, pacer->pa_burst_tokens);
     }
-
+    /* 先处理不参与pacing的个数 */
     if (pacer->pa_burst_tokens > 0)
     {
         --pacer->pa_burst_tokens;
@@ -73,7 +74,7 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
     }
 
     sched_time = pacer->pa_now;
-    delay = tx_time(tx_ctx);
+    delay = tx_time(tx_ctx); /* 根据pacing_rate计算包发送时间 */
     if (pacer->pa_flags & PA_LAST_SCHED_DELAYED)
     {
         pacer->pa_next_sched += delay;
@@ -89,7 +90,7 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
             pacer->pa_last_delayed = 0;
         }
     }
-    else
+    else /* 下个包的发送时间 直接加上本包发送时间 */
         pacer->pa_next_sched = MAX(pacer->pa_next_sched + delay,
                                                     sched_time + delay);
     LSQ_DEBUG("next_sched is set to %"PRIu64" usec from now",
@@ -110,8 +111,10 @@ lsquic_pacer_can_schedule (struct pacer *pacer, unsigned n_in_flight)
 {
     int can;
 
+    /* 还有 不参与pacing的令牌 或者 idle restart 可以直接发送 */
     if (pacer->pa_burst_tokens > 0 || n_in_flight == 0)
         can = 1;
+    /* 下个包的发送时间超过了本tick时间, 就不可发送 */
     else if (pacer->pa_next_sched > pacer->pa_now + pacer->pa_clock_granularity)
     {
         pacer->pa_flags |= PA_LAST_SCHED_DELAYED;

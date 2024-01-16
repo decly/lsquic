@@ -35,9 +35,12 @@ lsquic_set32_has (const struct lsquic_set32 *, uint32_t value);
 struct lsquic_set64_elem;
 
 typedef struct lsquic_set64 {
-    struct lsquic_set64_elem   *elems;
+    struct lsquic_set64_elem   *elems;  /* 各区间[low,high]的数组
+                                         * 使用二分查找是否在区间内: lsquic_set64_has()
+                                         */
     uint64_t                    lowset; /* Bitmask for values 0 - 63 */
-    int                         n_elems, n_alloc;
+                                        /* value小于64直接使用位快速查找 */
+    int                         n_elems, n_alloc; /* n_elems为elems的个数 */
 } lsquic_set64_t;
 
 void

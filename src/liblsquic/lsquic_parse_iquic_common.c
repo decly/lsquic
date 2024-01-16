@@ -240,17 +240,20 @@ lsquic_is_valid_iquic_hs_packet (const unsigned char *buf, size_t length,
 }
 
 
+/* 索引为帧类型取值, 数值为帧类型,
+ * 解析各帧类型函数集合为lsquic_parse_funcs_ietf_v1
+ */
 const enum quic_frame_type lsquic_iquic_byte2type[0x40] =
 {
     [0x00] = QUIC_FRAME_PADDING,
     [0x01] = QUIC_FRAME_PING,
-    [0x02] = QUIC_FRAME_ACK,
-    [0x03] = QUIC_FRAME_ACK,
-    [0x04] = QUIC_FRAME_RST_STREAM,
+    [0x02] = QUIC_FRAME_ACK,                /* 0x02和0x03都为ACK帧 */
+    [0x03] = QUIC_FRAME_ACK,                /* 0x03 ACK帧也会包含到目前为止在该连接上收到的带有相关ECN标记的QUIC数据包的累计值 */
+    [0x04] = QUIC_FRAME_RST_STREAM,         /* 流重置帧 */
     [0x05] = QUIC_FRAME_STOP_SENDING,
     [0x06] = QUIC_FRAME_CRYPTO,
     [0x07] = QUIC_FRAME_NEW_TOKEN,
-    [0x08] = QUIC_FRAME_STREAM,
+    [0x08] = QUIC_FRAME_STREAM,             /* 0b00001XXX都为流帧, 即0x08到0x0F, 后三位分别表示OFF/LEN/FIN位 */
     [0x09] = QUIC_FRAME_STREAM,
     [0x0A] = QUIC_FRAME_STREAM,
     [0x0B] = QUIC_FRAME_STREAM,
@@ -258,13 +261,13 @@ const enum quic_frame_type lsquic_iquic_byte2type[0x40] =
     [0x0D] = QUIC_FRAME_STREAM,
     [0x0E] = QUIC_FRAME_STREAM,
     [0x0F] = QUIC_FRAME_STREAM,
-    [0x10] = QUIC_FRAME_MAX_DATA,
-    [0x11] = QUIC_FRAME_MAX_STREAM_DATA,
-    [0x12] = QUIC_FRAME_MAX_STREAMS,
+    [0x10] = QUIC_FRAME_MAX_DATA,           /* 最大数据量帧 */
+    [0x11] = QUIC_FRAME_MAX_STREAM_DATA,    /* 最大流数据量帧 */
+    [0x12] = QUIC_FRAME_MAX_STREAMS,        /* 最大流帧, 0x12用于双向流, 0x13用于单向流 */
     [0x13] = QUIC_FRAME_MAX_STREAMS,
     [0x14] = QUIC_FRAME_BLOCKED,
-    [0x15] = QUIC_FRAME_STREAM_BLOCKED,
-    [0x16] = QUIC_FRAME_STREAMS_BLOCKED,
+    [0x15] = QUIC_FRAME_STREAM_BLOCKED,     /* 流数据阻塞帧 */
+    [0x16] = QUIC_FRAME_STREAMS_BLOCKED,    /* 流阻塞帧, 0x16用于表示双向流达到上限，0x17表示单向流达到上限 */
     [0x17] = QUIC_FRAME_STREAMS_BLOCKED,
     [0x18] = QUIC_FRAME_NEW_CONNECTION_ID,
     [0x19] = QUIC_FRAME_RETIRE_CONNECTION_ID,

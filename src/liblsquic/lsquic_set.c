@@ -343,16 +343,18 @@ lsquic_set64_add (struct lsquic_set64 *set, uint64_t value)
 }
 
 
+/* 查找value是否在set中 */
 int
 lsquic_set64_has (const struct lsquic_set64 *set, uint64_t value)
 {
-    if (value < 64)
+    if (value < 64) /* 64范围内使用位快速查找 */
     {
         return !!(set->lowset & (1ULL << value));
     }
 
     int low, high, i;
 
+    /* 使用二分查找, 查找value是否某个子范围内, 找到返回1 */
     low = 0, high = set->n_elems - 1;
     while (low <= high)
     {

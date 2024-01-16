@@ -22,13 +22,15 @@ TAILQ_HEAD(hels_head, lsquic_hash_elem);
 
 struct lsquic_hash
 {
-    struct hels_head        *qh_buckets,
-                             qh_all;
+    struct hels_head        *qh_buckets, /* 哈希表 */
+                             qh_all;     /* 所有元素(struct lsquic_hash_elem)的双向链表, 按照元素插入的顺序排列,
+                                          * 元素都会加到qh_buckets哈希表和qh_all链表中
+                                          */
     struct lsquic_hash_elem *qh_iter_next;
     int                    (*qh_cmp)(const void *, const void *, size_t);
     unsigned               (*qh_hash)(const void *, size_t, unsigned seed);
-    unsigned                 qh_count;
-    unsigned                 qh_nbits;
+    unsigned                 qh_count;  /* 哈希表中元素个数 */
+    unsigned                 qh_nbits;  /* 哈希表桶的位数, 桶个数 = 1 << qh_nbits */
 };
 
 
@@ -148,12 +150,12 @@ lsquic_hash_find (struct lsquic_hash *hash, const void *key, unsigned key_sz)
     unsigned buckno, hash_val;
     struct lsquic_hash_elem *el;
 
-    hash_val = hash->qh_hash(key, key_sz, (uintptr_t) hash);
+    hash_val = hash->qh_hash(key, key_sz, (uintptr_t) hash); /* qh_hash为XXH32() */
     buckno = BUCKNO(hash->qh_nbits, hash_val);
     TAILQ_FOREACH(el, &hash->qh_buckets[buckno], qhe_next_bucket)
         if (hash_val == el->qhe_hash_val &&
             key_sz   == el->qhe_key_len &&
-            0 == hash->qh_cmp(key, el->qhe_key_data, key_sz))
+            0 == hash->qh_cmp(key, el->qhe_key_data, key_sz)) /* qh_cmp为memcmp() */
         {
             return el;
         }

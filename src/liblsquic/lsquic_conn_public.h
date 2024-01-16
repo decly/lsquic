@@ -28,10 +28,12 @@ struct lsquic_conn_public {
                                     read_streams,
                                     write_streams,      /* Send STREAM frames */
                                     service_streams;
-    struct lsquic_hash             *all_streams;
+    struct lsquic_hash             *all_streams;    /* 保存所有流的哈希表,
+                                                     * key为stream id, value为struct lsquic_stream地址
+                                                     */
     struct lsquic_cfcw              cfcw;
     struct lsquic_conn_cap          conn_cap;
-    struct lsquic_rtt_stats         rtt_stats;
+    struct lsquic_rtt_stats         rtt_stats;		/* 保存rtt信息 */
     struct lsquic_engine_public    *enpub;
     struct malo                    *packet_out_malo;
     struct lsquic_conn             *lconn;

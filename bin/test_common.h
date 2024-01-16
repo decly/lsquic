@@ -61,7 +61,7 @@ struct service_port {
     int                        drop_init;
     char                       if_name[IFNAMSIZ];
 #endif
-    struct event              *ev;
+    struct event              *ev;	/* ´¦Àíº¯Êýread_handler() */
     struct lsquic_engine      *engine;
     void                      *conn_ctx;
     char                       host[80];

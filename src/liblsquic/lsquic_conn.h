@@ -37,24 +37,26 @@ struct conn_stats;
 enum lsquic_conn_flags {
     LSCONN_TICKED         = (1 << 0),
     LSCONN_HAS_OUTGOING   = (1 << 1),
-    LSCONN_HASHED         = (1 << 2),
+    LSCONN_HASHED         = (1 << 2),   /* 表示连接被加入哈希表(lsquic_engine->conns_hash)中 */
     LSCONN_MINI           = (1 << 3),   /* This is a mini connection */
     LSCONN_IMMED_CLOSE    = (1 << 4),
     LSCONN_PROMOTE_FAIL   = (1 << 5),
-    LSCONN_HANDSHAKE_DONE = (1 << 6),
+    LSCONN_HANDSHAKE_DONE = (1 << 6),   /* 表示TLS握手是否已经完成 */
     LSCONN_CLOSING        = (1 << 7),
     LSCONN_PEER_GOING_AWAY= (1 << 8),
     LSCONN_TCID0          = (1 << 9),
     LSCONN_VER_SET        = (1 <<10),   /* cn_version is set */
     LSCONN_EVANESCENT     = (1 <<11),   /* evanescent connection */
     LSCONN_TICKABLE       = (1 <<12),   /* Connection is in the Tickable Queue */
+                                        /* 连接被加入了conns_tickable队列 */
     LSCONN_COI_ACTIVE     = (1 <<13),
     LSCONN_COI_INACTIVE   = (1 <<14),
     LSCONN_SEND_BLOCKED   = (1 <<15),   /* Send connection blocked frame */
     LSCONN_PROMOTED       = (1 <<16),   /* Promoted.  Only set if LSCONN_MINI is set */
+                                        /* 表示该mini conn的连接已经创建了full conn */
     LSCONN_NEVER_TICKABLE = (1 <<17),   /* Do not put onto the Tickable Queue */
     LSCONN_UNUSED_18      = (1 <<18),
-    LSCONN_ATTQ           = (1 <<19),
+    LSCONN_ATTQ           = (1 <<19),	/* 连接被加入了ATTQ队列中 */
     LSCONN_SKIP_ON_PROC   = (1 <<20),
     LSCONN_UNUSED_21      = (1 <<21),
     LSCONN_SERVER         = (1 <<22),
@@ -80,12 +82,15 @@ struct network_path
     union {
         unsigned char           buf[sizeof(struct sockaddr_in6)];
         struct sockaddr         sockaddr;
-    }               np_local_addr_u;
+    }               np_local_addr_u; /* 本端地址 */
 #define np_local_addr np_local_addr_u.buf
-    unsigned char   np_peer_addr[sizeof(struct sockaddr_in6)];
+    unsigned char   np_peer_addr[sizeof(struct sockaddr_in6)]; /* 对端地址 */
     void           *np_peer_ctx;
-    lsquic_cid_t    np_dcid;
-    unsigned short  np_pack_size;
+    lsquic_cid_t    np_dcid;        /* 保存对端的cid */
+    unsigned short  np_pack_size;   /* mss大小
+                                     * v4默认IQUIC_MAX_IPv4_PACKET_SZ
+                                     * v6默认IQUIC_MAX_IPv6_PACKET_SZ
+                                     */
     unsigned char   np_path_id;
 };
 
@@ -301,7 +306,7 @@ struct conn_iface
 struct conn_cid_elem
 {
     struct lsquic_hash_elem     cce_hash_el;    /* Must be first element */
-    lsquic_cid_t                cce_cid;
+    lsquic_cid_t                cce_cid;        /* 这里为cid */
     union {
         unsigned            seqno;
         unsigned short      port;
@@ -310,10 +315,12 @@ struct conn_cid_elem
 #define cce_port cce_u.port
     enum conn_cce_flags {
         CCE_USED        = 1 << 0,       /* Connection ID has been used */
+                                        /* 表示cce_cid被使用 */
         CCE_SEQNO       = 1 << 1,       /* cce_seqno is set (CIDs in Initial
                                          * packets have no sequence number).
                                          */
         CCE_REG         = 1 << 2,       /* CID has been registered */
+                                        /* 表示该cid被注册了(连接被加入连接表conns_hash) */
         CCE_PORT        = 1 << 3,       /* It's not a CID element at all:
                                          * cce_port is the hash value.
                                          */
@@ -324,7 +331,7 @@ struct lsquic_conn
 {
     void                        *cn_enc_session;
     const struct enc_session_funcs_common
-                                *cn_esf_c;
+                                *cn_esf_c;  /* iquic为lsquic_enc_session_common_gquic_1  */
     union {
         const struct enc_session_funcs_gquic   *g;
         const struct enc_session_funcs_iquic   *i;
@@ -338,16 +345,24 @@ struct lsquic_conn
     TAILQ_ENTRY(lsquic_conn)     cn_next_ticked;
     TAILQ_ENTRY(lsquic_conn)     cn_next_out;
     TAILQ_ENTRY(lsquic_conn)     cn_next_pr;
-    const struct conn_iface     *cn_if;
-    const struct parse_funcs    *cn_pf;
+    const struct conn_iface     *cn_if;             /* iquic的mini连接为mini_conn_ietf_iface,
+                                                     * 服务端的full连接为ietf_full_conn_iface_ptr
+                                                     * 客户端的full连接为ietf_full_conn_prehsk_iface_ptr
+                                                     */
+    const struct parse_funcs    *cn_pf;             /* 解析包和帧的函数集合
+                                                     * iquic为lsquic_parse_funcs_ietf_v1
+                                                     */
     struct attq_elem            *cn_attq_elem;
     lsquic_cid_t                 cn_logid;
     lsquic_time_t                cn_last_sent;
-    lsquic_time_t                cn_last_ticked;
-    struct conn_cid_elem        *cn_cces;   /* At least one is available */
+    lsquic_time_t                cn_last_ticked;	/* 被conns_tickable处理的时间 */
+    struct conn_cid_elem        *cn_cces;           /* At least one is available */
+                                                    /* mini连接指向struct ietf_mini_conn->imc_cces
+                                                     * full连接指向struct ietf_full_conn->ifc_cces
+                                                     */
     lsquic_conn_ctx_t           *cn_conn_ctx;
     enum lsquic_conn_flags       cn_flags;
-    enum lsquic_version          cn_version:8;
+    enum lsquic_version          cn_version:8;      /* quic版本 */
     unsigned char                cn_cces_mask;  /* Those that are set */
     unsigned char                cn_n_cces; /* Number of CCEs in cn_cces */
     unsigned char                cn_cur_cce_idx;

@@ -226,7 +226,7 @@ lsquic_conn_abort (struct lsquic_conn *lconn)
 void
 lsquic_generate_cid (lsquic_cid_t *cid, size_t len)
 {
-    if (!len)
+    if (!len) /* 没设置长度的话则随机8~20字节的长度 */
     {
         /* If not set, generate ID between 8 and MAX_CID_LEN bytes in length */
         RAND_bytes((uint8_t *) &len, sizeof(len));
