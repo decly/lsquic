@@ -101,17 +101,17 @@ TAILQ_HEAD(stream_frames_tailq, stream_frame);
 
 struct nocopy_data_in
 {
-    struct stream_frames_tailq  ncdi_frames_in;
-    struct data_in              ncdi_data_in;
+    struct stream_frames_tailq  ncdi_frames_in; /* 保存帧的队列, 按照数据的偏移排序 */
+    struct data_in              ncdi_data_in;   /* lsquic_stream->data_in实际指向这里 */
     struct lsquic_conn_public  *ncdi_conn_pub;
-    uint64_t                    ncdi_byteage;
-    uint64_t                    ncdi_fin_off;
+    uint64_t                    ncdi_byteage;   /* ncdi_frames_in中所有帧的数据长度 */
+    uint64_t                    ncdi_fin_off;   /* 携带FIN的帧的数据尾部 */
     lsquic_stream_id_t          ncdi_stream_id;
-    unsigned                    ncdi_n_frames;
-    unsigned                    ncdi_n_holes;
+    unsigned                    ncdi_n_frames;  /* ncdi_frames_in中帧的个数 */
+    unsigned                    ncdi_n_holes;   /* ncdi_frames_in中帧的数据存在洞的个数(数据不连续) */
     unsigned                    ncdi_cons_far;
     enum {
-        NCDI_FIN_SET        = 1 << 0,
+        NCDI_FIN_SET        = 1 << 0,       /* 设置已经收到了FIN */
         NCDI_FIN_REACHED    = 1 << 1,
     }                           ncdi_flags;
 };
@@ -204,6 +204,7 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
     stream_frame_t *prev_frame, *next_frame;
     unsigned count;
 
+    /* 读取位置超过帧尾部, 数据重复了 */
     if (read_offset > DF_END(new_frame))
     {
         if (DF_FIN(new_frame))
@@ -212,6 +213,7 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
             return INS_FRAME_DUP                                | CASE('B');
     }
 
+    /* 之前已经收到了FIN, 下面处理几个异常的数据偏移 */
     if (ncdi->ncdi_flags & NCDI_FIN_SET)
     {
         if (DF_FIN(new_frame) && DF_END(new_frame) != ncdi->ncdi_fin_off)
@@ -222,13 +224,16 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
             return INS_FRAME_DUP                                | CASE('M');
     }
     else
-    {
+    { /* 该数据已经被读取了, 重复了 */
         if (read_offset == DF_END(new_frame) && !DF_FIN(new_frame))
             return INS_FRAME_DUP                                | CASE('L');
     }
 
     /* Find position in the list, going backwards.  We go backwards because
      * that is the most likely scenario.
+     */
+    /* 从尾部往前遍历帧, 按照帧数据偏移的顺序找到存放new_frame的位置:
+     * prev_frame < new_frame < next_frame
      */
     next_frame = TAILQ_LAST(&ncdi->ncdi_frames_in, stream_frames_tailq);
     if (next_frame && DF_OFF(new_frame) < DF_OFF(next_frame))
@@ -256,11 +261,12 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
         next_frame = TAILQ_NEXT(next_frame, next_frame);
     }
 
+    /* 这个case判断new_frame与prev_frame以及next_frame是否有数据重复 */
     const int select = !!prev_frame << 1 | !!next_frame;
     switch (select)
     {
     default:    /* No neighbors */
-        if (read_offset == DF_END(new_frame))
+        if (read_offset == DF_END(new_frame)) /* new与已读数据重复了 */
         {
             if (DF_SIZE(new_frame))
             {
@@ -282,26 +288,27 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
     case 3:     /* Both left and right neighbors */
     case 2:     /* Only left neighbor (prev_frame) */
         if (DF_OFF(prev_frame) == DF_OFF(new_frame)
-            && DF_SIZE(prev_frame) == DF_SIZE(new_frame))
+            && DF_SIZE(prev_frame) == DF_SIZE(new_frame)) /* new与prev数据完全重复了 */
         {
             if (!DF_FIN(prev_frame) && DF_FIN(new_frame))
                 return INS_FRAME_OVERLAP                        | CASE('H');
             else
                 return INS_FRAME_DUP                            | CASE('I');
         }
-        if (DF_END(prev_frame) > DF_OFF(new_frame))
+        if (DF_END(prev_frame) > DF_OFF(new_frame)) /* new与prev部分数据重复了 */
             return INS_FRAME_OVERLAP                            | CASE('J');
         if (select == 2)
             goto have_prev;
         /* Fall-through */
     case 1:     /* Only right neighbor (next_frame) */
-        if (DF_END(new_frame) > DF_OFF(next_frame))
+        if (DF_END(new_frame) > DF_OFF(next_frame)) /* new与next数据重复了 */
             return INS_FRAME_OVERLAP                            | CASE('K');
         else if (read_offset > DF_OFF(new_frame))
             return INS_FRAME_OVERLAP                            | CASE('O');
         break;
     }
 
+    /* 接下来将new_frame插入到ncdi_frames_in队列中保存起来 */
     if (prev_frame)
     {
   have_prev:
@@ -322,7 +329,7 @@ insert_frame (struct nocopy_data_in *ncdi, struct stream_frame *new_frame,
     }
     CHECK_ORDER(ncdi);
 
-    if (DF_FIN(new_frame))
+    if (DF_FIN(new_frame)) /* 收到了FIN */
     {
         ncdi->ncdi_flags |= NCDI_FIN_SET;
         ncdi->ncdi_fin_off = DF_END(new_frame);
@@ -377,7 +384,7 @@ static enum ins_frame
 nocopy_di_insert_frame (struct data_in *data_in,
                         struct stream_frame *new_frame, uint64_t read_offset)
 {
-    struct nocopy_data_in *const ncdi = NCDI_PTR(data_in);
+    struct nocopy_data_in *const ncdi = NCDI_PTR(data_in); /* 获取nocopy_data_in的地址 */
     unsigned count;
     enum ins_frame ins;
     int ins_case;
@@ -457,6 +464,7 @@ nocopy_di_empty (struct data_in *data_in)
 }
 
 
+/* 将原来lsquic_stream->data_in的nocopy_data_in释放用hash_data_in代替 */
 static struct data_in *
 nocopy_di_switch_impl (struct data_in *data_in, uint64_t read_offset)
 {
@@ -465,11 +473,13 @@ nocopy_di_switch_impl (struct data_in *data_in, uint64_t read_offset)
     stream_frame_t *frame;
     enum ins_frame ins;
 
+    /* 分配hash_data_in结构 */
     new_data_in = lsquic_data_in_hash_new(ncdi->ncdi_conn_pub,
                                 ncdi->ncdi_stream_id, ncdi->ncdi_byteage);
     if (!new_data_in)
         goto end;
 
+    /* 将保存的帧从旧的nocopy_data_in删除重新加入新的hash_data_in */
     while ((frame = TAILQ_FIRST(&ncdi->ncdi_frames_in)))
     {
         TAILQ_REMOVE(&ncdi->ncdi_frames_in, frame, next_frame);

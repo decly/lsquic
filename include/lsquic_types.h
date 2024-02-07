@@ -26,13 +26,14 @@
  */
 typedef struct lsquic_cid /* 表示连接ID */
 {
-    uint8_t     buf[MAX_CID_LEN];
+    uint8_t     buf[MAX_CID_LEN]; /* CID */
 #define idbuf buf
     uint_fast8_t len; /* cid的长度 */
 } ALIGNED_(8)
 lsquic_cid_t;
 
 
+/* 判断两个CID相等返回1 */
 #define LSQUIC_CIDS_EQ(a, b) ((a)->len == 8 ? \
     (b)->len == 8 && *(uint64_t *)((a)->buf) == *(uint64_t *)((b)->buf) : \
     (a)->len == (b)->len && 0 == memcmp((a)->idbuf, (b)->idbuf, (a)->len))

@@ -41,7 +41,7 @@ struct lsquic_mm {
         struct malo     *dcid_elem;     /* For struct dcid_elem */
         struct malo     *stream_hq_frame;   /* For struct stream_hq_frame */
     }                    malo;
-    TAILQ_HEAD(, lsquic_packet_in)  free_packets_in;
+    TAILQ_HEAD(, lsquic_packet_in)  free_packets_in; /* 缓存已释放的packet, 下次分配时直接使用 */
     SLIST_HEAD(, packet_out_buf)    packet_out_bufs[MM_N_OUT_BUCKETS];
     struct pool_stats               packet_out_bstats[MM_N_OUT_BUCKETS];
     struct pool_stats               packet_in_bstats[MM_N_IN_BUCKETS];

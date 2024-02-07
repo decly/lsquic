@@ -153,6 +153,7 @@ lsquic_hash_find (struct lsquic_hash *hash, const void *key, unsigned key_sz)
     hash_val = hash->qh_hash(key, key_sz, (uintptr_t) hash); /* qh_hash为XXH32() */
     buckno = BUCKNO(hash->qh_nbits, hash_val);
     TAILQ_FOREACH(el, &hash->qh_buckets[buckno], qhe_next_bucket)
+        /* 通过key值哈希值, key值大小以及key内容完全匹配才算找到 */
         if (hash_val == el->qhe_hash_val &&
             key_sz   == el->qhe_key_len &&
             0 == hash->qh_cmp(key, el->qhe_key_data, key_sz)) /* qh_cmp为memcmp() */

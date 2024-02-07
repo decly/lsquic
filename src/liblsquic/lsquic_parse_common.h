@@ -15,9 +15,17 @@ struct packin_parse_state;
 
 struct packin_parse_state {
     const unsigned char     *pps_p;      /* Pointer to packet number */
-                                         /* 指向数据包中数据包号长度的位置 */
+                                         /* 短包头数据包指向数据包中包号的位置 */
+                                         /* 长包头数据包中:
+                                          * - initial/0-rtt/handshake 指向了包号前的length字段
+                                          * - retry/版本协商包 为NULL
+                                          */
     unsigned                 pps_nbytes; /* Number of bytes in packet number */
-                                         /* 数据包号长度 */
+                                         /* 短包头数据包为包号长度 */
+                                         /* 长包头数据包中:
+                                          * - initial/0-rtt/handshake 为length字段的长度
+                                          * - retry/版本协商包 为0
+                                          */
 };
 
 int

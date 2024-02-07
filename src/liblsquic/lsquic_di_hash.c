@@ -45,6 +45,7 @@
 
 #define N_DB_SETS 57
 
+/* 值为3616 */
 #define DB_DATA_SIZE (0x1000 - sizeof(TAILQ_ENTRY(data_block)) - \
                                 sizeof(uint64_t) - N_DB_SETS * sizeof(uint64_t))
 
@@ -69,7 +70,7 @@ static const struct data_in_iface *di_if_hash_ptr;
 
 struct hash_data_in
 {
-    struct data_in              hdi_data_in;
+    struct data_in              hdi_data_in;    /* lsquic_stream->data_in实际指向这里 */
     struct lsquic_conn_public  *hdi_conn_pub;
     uint64_t                    hdi_fin_off;
     struct dblock_head         *hdi_buckets;
@@ -77,7 +78,7 @@ struct hash_data_in
     struct data_frame           hdi_data_frame;
     lsquic_stream_id_t          hdi_stream_id;
     unsigned                    hdi_count;
-    unsigned                    hdi_nbits;
+    unsigned                    hdi_nbits;      /* hdi_buckets哈希表桶个数的对数, 即1<<hdi_nbits */
     enum {
             HDI_FIN = (1 << 0),
     }                           hdi_flags;
@@ -358,6 +359,7 @@ lsquic_data_in_hash_insert_data_frame (struct data_in *data_in,
     const unsigned char *data;
     unsigned size, nw;
 
+    /* 数据已经被读取, 重复了 */
     if (data_frame->df_offset + data_frame->df_size < read_offset)
     {
         if (data_frame->df_fin)
@@ -366,6 +368,7 @@ lsquic_data_in_hash_insert_data_frame (struct data_in *data_in,
             return INS_FRAME_DUP;
     }
 
+    /* 已经收到了FIN, 又收到了携带FIN的数据帧但是数据尾部偏移不同, 出错 */
     if ((hdi->hdi_flags & HDI_FIN) &&
          (
           (data_frame->df_fin &&
@@ -379,14 +382,14 @@ lsquic_data_in_hash_insert_data_frame (struct data_in *data_in,
     }
 
     if (data_frame->df_offset < read_offset)
-    {
+    { /* 帧的部分数据已经被读取了, 即diff大小 */
         diff = read_offset - data_frame->df_offset;
         assert(diff <= data_frame->df_size);
         size = data_frame->df_size   - diff;
         off  = data_frame->df_offset + diff;
         data = data_frame->df_data   + diff;
     }
-    else
+    else /* 完整的帧数据 */
     {
         size = data_frame->df_size;
         off  = data_frame->df_offset;

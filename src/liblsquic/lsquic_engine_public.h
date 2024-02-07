@@ -44,7 +44,7 @@ struct lsquic_engine_public {
                                    *enp_shi;
     void                           *enp_shi_ctx;
     lsquic_time_t                   enp_last_warning[N_WARNING_TYPES];
-    const struct lsquic_stream_if  *enp_stream_if;
+    const struct lsquic_stream_if  *enp_stream_if;      /* 应用程序传递进来的回调接口, 比如http_server为http_server_if */
     void                           *enp_stream_if_ctx;
     const struct lsquic_hset_if    *enp_hsi_if;
     void                           *enp_hsi_ctx;

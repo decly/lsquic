@@ -181,7 +181,7 @@ enum stream_q_flags
 /* Stream behavior flags */
 enum stream_b_flags
 {
-    SMBF_SERVER       = 1 << 0,
+    SMBF_SERVER       = 1 << 0,  /* 表示是服务端 */
     SMBF_IETF         = 1 << 1,
     SMBF_USE_HEADERS  = 1 << 2,  /* 表示该流使用了HTTP/3头部帧(HEADERS frame)来传输头部信息 */
     SMBF_CRYPTO       = 1 << 3,  /* Crypto stream: applies to both gQUIC and IETF QUIC */
@@ -212,7 +212,7 @@ enum stream_d_flags
 
 
 enum stream_flags {
-    STREAM_FIN_RECVD    = 1 << 0,   /* Received STREAM frame with FIN bit set */
+    STREAM_FIN_RECVD    = 1 << 0,   /* Received STREAM frame with FIN bit set *//* 该流收到了FIN */
     STREAM_RST_RECVD    = 1 << 1,   /* Received RST frame *//* 该流收到了流重置帧 */
     STREAM_LAST_WRITE_OK= 1 << 2,   /* Used to break out of write event dispatch loop */
     STREAM_U_READ_DONE  = 1 << 3,   /* User is done reading (shutdown was called) */
@@ -251,7 +251,7 @@ enum stream_flags {
 #define NUM_ALLOCED_HQ_FRAMES 2
 
 
-struct lsquic_stream
+struct lsquic_stream /* 流结构, 表示一条流 */
 {
     struct lsquic_hash_elem         sm_hash_el;     /* 用于将流链入conn->ifc_pub.all_streams哈希表 */
     lsquic_stream_id_t              id;
@@ -260,7 +260,7 @@ struct lsquic_stream
     enum stream_q_flags             sm_qflags;
     unsigned                        n_unacked;
 
-    const struct lsquic_stream_if  *stream_if;
+    const struct lsquic_stream_if  *stream_if;      /* 上层服务提供的回调接口, 即lsquic_engine_public->enp_stream_if */
     struct lsquic_stream_ctx       *st_ctx;
     struct lsquic_conn_public      *conn_pub;
     TAILQ_ENTRY(lsquic_stream)      next_send_stream, next_read_stream,
@@ -278,9 +278,15 @@ struct lsquic_stream
     /* From the network, we get frames, which we keep on a list ordered
      * by offset.
      */
-    struct data_in                 *data_in;
+    struct data_in                 *data_in;        /* 用来保存STREAM帧数据
+                                                       指向nocopy_data_in->ncdi_data_in
+                                                         - 未使用SCF_USE_DI_HASH时
+                                                     * 指向hash_data_in->hdi_data_in
+                                                     *   - 使用SCF_USE_DI_HASH时 
+                                                     *   - 当帧数据存在重叠时也会从nocopy data切换到hash data(详见lsquic_stream_frame_in)
+                                                     */
     uint64_t                        read_offset;
-    lsquic_sfcw_t                   fc;
+    lsquic_sfcw_t                   fc;             /* 用于stream流控窗口 */
 
     /* List of active HQ frames */
     STAILQ_HEAD(, stream_hq_frame)  sm_hq_frames;
@@ -322,15 +328,22 @@ struct lsquic_stream
     uint64_t                        sm_hb_compl;
 
     /* Valid if STREAM_FIN_RECVD is set: */
-    uint64_t                        sm_fin_off;
+    uint64_t                        sm_fin_off; /* 携带FIN的流帧的数据尾部偏移(即最后一个字节的数据偏移) */
 
     /* A stream may be generating STREAM or CRYPTO frames */
+    /* iquic为stream_stream_frame_header_sz() */
     size_t                        (*sm_frame_header_sz)(
                                         const struct lsquic_stream *, unsigned);
     /* iquic中初始化为stream_write_to_packet_std() */
     enum swtp_status              (*sm_write_to_packet)(struct frame_gen_ctx *,
                                                 const size_t);
+    /* iquic stream模式初始化为stream_write_avail_no_frames(),
+     * HTTP模式则为stream_write_avail_with_headers()
+     */
     size_t                        (*sm_write_avail)(struct lsquic_stream *);
+    /* iquic stream模式为stream_readable_non_http()
+     * http模式为stream_readable_http_ietf()
+     */
     int                           (*sm_readable)(struct lsquic_stream *);
 
     /* 初始化为lsquic_send_ctl_get_packet_for_stream(),
@@ -388,7 +401,7 @@ struct lsquic_stream
     }                               sm_send_headers_state:8;
     enum stream_d_flags             sm_dflags:8;
     signed char                     sm_saved_want_write;
-    signed char                     sm_has_frame;
+    signed char                     sm_has_frame;       /* 表示data_in中当前有帧数据可被上层读取 */
 
 #if LSQUIC_KEEP_STREAM_HISTORY
     sm_hist_idx_t                   sm_hist_idx;
@@ -412,14 +425,14 @@ enum stream_ctor_flags
                                    * and hash-based to data input for optimal
                                    * performance.
                                    */
-    SCF_DISP_RW_ONCE  = SMBF_RW_ONCE,
+    SCF_DISP_RW_ONCE  = SMBF_RW_ONCE,  /* engine开启了es_rw_once参数 */
     SCF_CRITICAL      = SMBF_CRITICAL, /* This is a critical stream */
     SCF_IETF          = SMBF_IETF,
     SCF_HTTP          = SMBF_USE_HEADERS,
     SCF_CRYPTO        = SMBF_CRYPTO,
     SCF_HEADERS       = SMBF_HEADERS,
     SCF_HTTP_PRIO     = SMBF_HTTP_PRIO,
-    SCF_DELAY_ONCLOSE = SMBF_DELAY_ONCLOSE,
+    SCF_DELAY_ONCLOSE = SMBF_DELAY_ONCLOSE, /* engine开启了es_delay_onclose参数 */
 };
 
 

@@ -729,12 +729,14 @@ read_handler (evutil_socket_t fd, short flags, void *ctx)
         iter.ri_off = 0;
         iter.ri_idx = 0;
 
+        /* 接收数据, 使用recvmmsg/recvmsg */
 #if HAVE_RECVMMSG
+        /* 使用recvmmsg一次性接收多个数据包 */
         if (sport->sp_prog->prog_use_recvmmsg)
             rop = read_using_recvmmsg(&iter);
         else
 #endif
-            do
+            do /* 使用recvmsg循环接收 */
                 rop = read_one_packet(&iter);
             while (ROP_OK == rop);
 
@@ -748,6 +750,7 @@ read_handler (evutil_socket_t fd, short flags, void *ctx)
 
         n_batches += iter.ri_idx > 0;
 
+        /* 循环每个UDP包 调用lsquic_engine_packet_in()接口处理 */
         for (n = 0; n < iter.ri_idx; ++n)
             if (0 > lsquic_engine_packet_in(engine,
 #ifndef WIN32
@@ -768,10 +771,11 @@ read_handler (evutil_socket_t fd, short flags, void *ctx)
                         ))
                 break;
 
+        /* 有收到包就调用lsquic_engine_process_conns()接口处理连接 */
         if (n > 0)
             prog_process_conns(sport->sp_prog);
     }
-    while (ROP_NOROOM == rop && !prog_is_stopped());
+    while (ROP_NOROOM == rop && !prog_is_stopped()); /* 还有没收完的数据 */
 
     if (n_batches)
         n += n_alloc * (n_batches - 1);

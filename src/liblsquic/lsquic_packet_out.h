@@ -76,7 +76,7 @@ typedef struct lsquic_packet_out
     TAILQ_ENTRY(lsquic_packet_out)
                        po_next;
     lsquic_time_t      po_sent;       /* Time sent *//* 发送时间 */
-    lsquic_packno_t    po_packno;	/* 包号 */
+    lsquic_packno_t    po_packno;       /* 包号 */
     lsquic_packno_t    po_ack2ed;       /* If packet has ACK frame, value of
                                          * largest acked in it.
                                          */
@@ -105,6 +105,7 @@ typedef struct lsquic_packet_out
         PO_BITS_0   = (1 << 5),         /* PO_BITS_0 and PO_BITS_1 encode the */
         PO_BITS_1   = (1 << 6),         /*   packet number length.  See macros below. */
         PO_NONCE    = (1 << 7),         /* Use value in `po_nonce' to generate header */
+                                        /* 表示po_nonce有被使用, 比如保存了po_token */
         PO_VERSION  = (1 << 8),         /* Use value in `po_ver_tag' to generate header */
         PO_CONN_ID  = (1 << 9),         /* Include connection ID in public header */
         PO_REPACKNO = (1 <<10),         /* Regenerate packet number *//* 表示需要重新设置包号 */
@@ -114,7 +115,8 @@ typedef struct lsquic_packet_out
                     = (1 <<13),         /* STREAM frame reaches the end of the packet: no
                                          * further writes are allowed.
                                          */
-        PO_SCHED    = (1 <<14),         /* On scheduled queue *//* 表示在sc_scheduled_packets队列中 */
+        PO_SCHED    = (1 <<14),         /* On scheduled queue */
+                                        /* 表示在sc_scheduled_packets队列中 */
         PO_SENT_SZ  = (1 <<15),         /* 丢失记录设置该标记然后将包大小保存到po_sent_sz中 */
         PO_LONGHEAD = (1 <<16),
         PO_ACKED_LOSS_CHAIN = (1<<17),  /* 表示该数据包/丢失记录对应的原始数据包已经被确认了,
@@ -146,9 +148,9 @@ typedef struct lsquic_packet_out
     unsigned short     po_data_sz;      /* Number of usable bytes in data */
     unsigned short     po_enc_data_sz;  /* Number of usable bytes in data */
     unsigned short     po_sent_sz;      /* If PO_SENT_SZ is set, real size of sent buffer. */
-    					/* 如果PO_SENT_SZ置位, 那么该值为包大小
-					 * 比如丢失记录(PO_LOSS_REC)保存着原始包大小
-					 */
+                                        /* 如果PO_SENT_SZ置位, 那么该值为包大小
+	                                     * 比如丢失记录(PO_LOSS_REC)保存着原始包大小
+					                     */
     /* TODO Revisit po_regen_sz once gQUIC is dropped.  Now that all frames
      * are recorded, we have more flexibility where to place ACK frames; they
      * no longer really have to be at the beginning of the packet, since we
@@ -160,7 +162,7 @@ typedef struct lsquic_packet_out
                                          * frames.
                                          */
     unsigned short     po_n_alloc;      /* Total number of bytes allocated in po_data */
-    unsigned short     po_token_len;
+    unsigned short     po_token_len;    /* 要发送token的大小(token保存在po_token中) */
     enum header_type   po_header_type:8;
     unsigned char      po_dcid_len;     /* If PO_ENCRYPTED is set */
     enum {
@@ -181,7 +183,7 @@ typedef struct lsquic_packet_out
 #endif
         POL_LIMITED     = 1 << 10,      /* Used to credit sc_next_limit if needed. */
                                         /* 表示被sc_next_limit限制时发送, 比如RTO触发时会设置只能发送两个包 */
-        POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK检测丢失 */
+        POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK标记丢失 */
     }                  po_lflags:16;
     unsigned char     *po_data;
 

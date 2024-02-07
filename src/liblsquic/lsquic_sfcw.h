@@ -9,17 +9,25 @@
 struct lsquic_cfcw;
 struct lsquic_conn_public;
 
-typedef struct lsquic_sfcw {
+typedef struct lsquic_sfcw { /* stream流控窗口, Stream Flow Control Window */
     struct lsquic_cfcw *sf_cfcw;            /* Connection flow control window,
                                              * NULL for streams 1 and 3.
                                              */
+                                            /* 连接级别的流控 */
     uint64_t            sf_max_recv_off;    /* Largest offset observed */
+                                            /* 记录接收到的最大帧数据偏移 */
     uint64_t            sf_recv_off;        /* Flow control receive offset */
+                                            /* stream流控的大小偏移
+                                             * 接收到数据的尾部偏移超过它则认为超出stream流控
+                                             */
     uint64_t            sf_read_off;        /* Number of bytes consumed */
+                                            /* 已经被上层读取的数据偏移 */
     lsquic_time_t       sf_last_updated;    /* Last time window was updated */
+                                            /* 上一次更新接收窗口的时间 */
     struct lsquic_conn_public
                        *sf_conn_pub;
     unsigned            sf_max_recv_win;    /* Maximum receive window */
+                                            /* 流控窗口的大小, 即sf_recv_off - sf_read_off */
     lsquic_stream_id_t  sf_stream_id;       /* Used for logging */
 } lsquic_sfcw_t;
 

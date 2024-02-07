@@ -135,6 +135,7 @@ find_free_slot (uintptr_t slots)
 }
 
 
+/* 每次扩大一倍分配 */
 static int
 rechist_grow (struct lsquic_rechist *rechist)
 {
@@ -144,15 +145,17 @@ rechist_grow (struct lsquic_rechist *rechist)
     char *mem;
 
     moff = (char *) rechist->rh_masks - (char *) rechist->rh_elems;
+    /* 初始为4个, 每次扩大一倍 */
     if (rechist->rh_n_alloced)
         nelems = rechist->rh_n_alloced * 2;
     else
         nelems = 4;
+    /* 最大分配不能超过rh_max_ranges */
     if (rechist->rh_max_ranges && nelems > rechist->rh_max_ranges)
         nelems = rechist->rh_max_ranges;
     n_masks = (nelems + (-nelems & (BITS_PER_MASK - 1))) / BITS_PER_MASK;
     size = sizeof(struct rechist_elem) * nelems + sizeof(uintptr_t) * n_masks;
-    mem = realloc(rechist->rh_elems, size);
+    mem = realloc(rechist->rh_elems, size); /* 重新分配内存 */
     if (!mem)
         return -1;
     if (moff)
@@ -207,7 +210,7 @@ rechist_alloc_elem (struct lsquic_rechist *rechist)
         if (rechist->rh_max_ranges
                             && rechist->rh_n_used >= rechist->rh_max_ranges)
             return rechist_reuse_last_elem(rechist);
-        if (0 != rechist_grow(rechist))
+        if (0 != rechist_grow(rechist)) /* 扩大一倍分配 */
             return -1;
     }
 

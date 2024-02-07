@@ -38,7 +38,7 @@ parse_ietf_v1_or_Q046plus_long_begin (struct lsquic_packet_in *packet_in,
     case LSQVER_050:
         return lsquic_Q050_parse_packet_in_long_begin(packet_in, length,
                                                 is_server, cid_len, state);
-    default: /* iquic */
+    default: /* iquic及所有非Q46/Q050 */
         return lsquic_ietf_v1_parse_packet_in_long_begin(packet_in, length,
                                                 is_server, cid_len, state);
     }
@@ -80,7 +80,7 @@ static int (* const parse_begin_funcs[32]) (struct lsquic_packet_in *,
     PBEL(0x00|0x40|0x20|0x00|0x08)  = lsquic_ietf_v1_parse_packet_in_short_begin,
     PBEL(0x00|0x40|0x20|0x10|0x00)  = lsquic_ietf_v1_parse_packet_in_short_begin,
     PBEL(0x00|0x40|0x20|0x10|0x08)  = lsquic_ietf_v1_parse_packet_in_short_begin,
-    /* 00XX 0GGG */
+    /* 00XX 0GGG *//* 以下0x40位为0不可能是iquic */
     PBEL(0x00|0x00|0x00|0x00|0x00)  = lsquic_Q046_parse_packet_in_short_begin,
     PBEL(0x00|0x00|0x00|0x10|0x00)  = lsquic_Q046_parse_packet_in_short_begin,
     PBEL(0x00|0x00|0x20|0x00|0x00)  = lsquic_Q046_parse_packet_in_short_begin,
@@ -368,7 +368,7 @@ const enum quic_ft_bit lsquic_legal_frames_by_level[N_LSQVER][N_ENC_LEVS] =
                     | QUIC_FTBIT_DATAGRAM
                     ,
     },
-    [LSQVER_I001] = {
+    [LSQVER_I001] = { /* iquic v1中每种数据包类型可以出现的帧类型 */
     [ENC_LEV_INIT] = QUIC_FTBIT_CRYPTO | QUIC_FTBIT_PADDING | QUIC_FTBIT_PING
                     | QUIC_FTBIT_ACK | QUIC_FTBIT_CONNECTION_CLOSE,
     [ENC_LEV_0RTT] = QUIC_FTBIT_PADDING | QUIC_FTBIT_PING

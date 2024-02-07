@@ -26,6 +26,10 @@ lsquic_rtt_stats_update (struct lsquic_rtt_stats *stats,
     if (send_delta > lack_delta)
         send_delta -= lack_delta;
     if (stats->srtt) {
+        /* ¼ÆËãsrttºÍrttvar:
+         * rttvar = 3/4 rttvar + 1/4 |rtt - srtt|
+         * srtt = 7/8 srtt + 1/8 rtt
+         */
         stats->rttvar -= stats->rttvar >> BETA_SHIFT;
         // FIXED: subtracting unsigned (the (int) cast gets repromoted to uint64_t
         // made abs() irrelevant and allowed overflow. instead cast the difference

@@ -49,9 +49,9 @@ lsquic_varint_read (const unsigned char *p, const unsigned char *end,
             return -1;
         memcpy(&val, p, 8);
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-        val = bswap_64(val);
+        val = bswap_64(val); /* 先转为小端字节序 */
 #endif
-        val &= (1ULL << 62) - 1;
+        val &= (1ULL << 62) - 1; /* 屏蔽前2bit */
         *valp = val;
         return 8;
     }

@@ -86,18 +86,19 @@ lsquic_cfcw_fc_offsets_changed (struct lsquic_cfcw *fc)
     return 1;
 }
 
-
+/* 检查是否超过连接流控, 范围内返回1, 超出则返回0 */
 int
 lsquic_cfcw_incr_max_recv_off (struct lsquic_cfcw *fc, uint64_t incr)
 {
+    /* 在连接流控的范围内, 正常的 */
     if (fc->cf_max_recv_off + incr <= fc->cf_recv_off)
     {
-        fc->cf_max_recv_off += incr;
+        fc->cf_max_recv_off += incr; /* 加上新的差值 */
         LSQ_DEBUG("max_recv_off goes from %"PRIu64" to %"PRIu64"",
                     fc->cf_max_recv_off - incr, fc->cf_max_recv_off);
         return 1;
     }
-    else
+    else /* 超出连接流控 */
     {
         LSQ_INFO("flow control violation: received at offset %"PRIu64", while "
             "flow control receive offset is %"PRIu64,

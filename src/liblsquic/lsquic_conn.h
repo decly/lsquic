@@ -331,7 +331,10 @@ struct lsquic_conn
 {
     void                        *cn_enc_session;
     const struct enc_session_funcs_common
-                                *cn_esf_c;  /* iquic为lsquic_enc_session_common_gquic_1  */
+                                *cn_esf_c;  /* 用于加解密的接口,
+                                             * 由select_esf_common_by_ver()根据quic版本选择.
+                                             * iquic为lsquic_enc_session_common_ietf_v1
+                                             */
     union {
         const struct enc_session_funcs_gquic   *g;
         const struct enc_session_funcs_iquic   *i;
@@ -434,6 +437,7 @@ struct conn_stats {
                             n_acks_proc,
                             n_acks_merged;
         unsigned long       bytes;              /* Overall bytes in */
+                                                /* 连接收到包的总大小 */
         unsigned long       headers_uncomp;     /* Sum of uncompressed header bytes */
         unsigned long       headers_comp;       /* Sum of compressed header bytes */
     }                   in;
@@ -443,6 +447,7 @@ struct conn_stats {
         unsigned long       acks;
         unsigned long       packets;            /* Number of sent packets */
         unsigned long       acked_via_loss;     /* Number of packets acked via loss record */
+                                                /* 丢失后又被确认的包个数(虚假重传) */
         unsigned long       lost_packets;
         unsigned long       retx_packets;       /* Number of retransmitted packets */
         unsigned long       bytes;              /* Overall bytes out */

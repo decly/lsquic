@@ -42,7 +42,7 @@ enum send_ctl_flags {
     SC_LOST_ACK_INIT=  1 << 8,
     SC_LOST_ACK_HSK = SC_LOST_ACK_INIT << PNS_HSK,
     SC_LOST_ACK_APP = SC_LOST_ACK_INIT << PNS_APP,
-    SC_1RTT_ACKED   =  1 << 11,
+    SC_1RTT_ACKED   =  1 << 11,     /* 表示有APP数据被ack */
     SC_APP_LIMITED  =  1 << 12,
     SC_ECN          =  1 << 13,
     SC_QL_BITS      =  1 << 14,
@@ -77,8 +77,8 @@ typedef struct lsquic_send_ctl {
     unsigned                        sc_bytes_unacked_retx;      /* sc_unacked_packets队列中可被重传的数据总量 */
     unsigned                        sc_bytes_scheduled;		    /* sc_scheduled_packets队列中的数据总量 */
     struct adaptive_cc              sc_adaptive_cc;
-    const struct cong_ctl_if       *sc_ci;
-    void                           *sc_cong_ctl;
+    const struct cong_ctl_if       *sc_ci;                  /* 拥塞算法接口 */
+    void                           *sc_cong_ctl;            /* 拥塞算法数据结构 */
     struct lsquic_engine_public    *sc_enpub;
     unsigned                        sc_bytes_unacked_all;	/* sc_unacked_packets队列中数据总量, 即所有未被确认的大小 */
     unsigned                        sc_n_in_flight_all;		/* sc_unacked_packets队列中的包个数 */
@@ -141,8 +141,8 @@ typedef struct lsquic_send_ctl {
                             n_delayed;
     }                               sc_stats;
 #endif
-    unsigned char                  *sc_token;
-    size_t                          sc_token_sz;
+    unsigned char                  *sc_token;       /* 保存retry包收到的token */
+    size_t                          sc_token_sz;    /* sc_token的长度 */
     unsigned                        sc_retry_count;
     unsigned                        sc_rt_count;    /* Count round trips */
     lsquic_packno_t                 sc_cur_rt_end;

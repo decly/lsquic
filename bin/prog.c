@@ -545,6 +545,7 @@ prog_process_conns (struct prog *prog)
     int diff;
     struct timeval timeout;
 
+    /* 处理连接 */
     lsquic_engine_process_conns(prog->prog_engine);
 
     if (lsquic_engine_earliest_adv_tick(prog->prog_engine, &diff))

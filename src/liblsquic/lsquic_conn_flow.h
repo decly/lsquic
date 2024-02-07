@@ -8,11 +8,15 @@
 
 struct lsquic_conn_public;
 
-typedef struct lsquic_cfcw {
+typedef struct lsquic_cfcw { /* 连接级别的流控, 控制所有流之和 */
     struct lsquic_conn_public
                  *cf_conn_pub;
     uint64_t      cf_max_recv_off;  /* Largest offset observed (cumulative) */
+                                    /* 记录接收到的最大数据偏移(所有流累加) */
     uint64_t      cf_recv_off;      /* Flow control receive offset */
+                                    /* 连接流控的大小偏移
+                                     * 所有流的偏移相加(cf_max_recv_off)超过它则认为超出连接流控
+                                     */
     uint64_t      cf_read_off;      /* Number of bytes consumed (cumulative) */
     lsquic_time_t cf_last_updated;
     unsigned      cf_max_recv_win;  /* Maximum receive window */

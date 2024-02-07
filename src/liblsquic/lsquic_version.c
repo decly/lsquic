@@ -47,7 +47,7 @@ lsquic_tag2ver (uint32_t ver_tag)
     return -1;
 }
 
-
+/* 从四字节的版本号中解析quic版本 */
 enum lsquic_version
 lsquic_tag2ver_fast (const unsigned char *tag)
 {
@@ -59,18 +59,19 @@ lsquic_tag2ver_fast (const unsigned char *tag)
             return LSQVER_050;
         else if (*(tag + 2) == '4' && *(tag + 3) == '6')
             return LSQVER_046;
+        /* Q043的格式不一样, 没在这里检查 */
     }
     else if (ch == 0x6b && *(tag + 1) == 0x33
              && *(tag + 2) == 0x43 && *(tag + 3) == 0xcf)
     {
-        return LSQVER_I002;
+        return LSQVER_I002; /* iquic v2: 0x0b3343cf */
     }
     else if (ch == '\0' && *(tag + 1) == 0 && *(tag + 2) == 0)
     {
         if (*(tag + 3) == 0x01)
-            return LSQVER_I001;
+            return LSQVER_I001; /* iquic v1: 0x00000001 */
         else if (*(tag + 3) == 0x00)
-            return LSQVER_VERNEG;
+            return LSQVER_VERNEG; /* 全0位版本协商 */
     }
     else if (ch == 0xff && *(tag + 1) == 0 && *(tag + 2) == 0)
     {
@@ -81,7 +82,7 @@ lsquic_tag2ver_fast (const unsigned char *tag)
     }
     else if ((ch & 0xf) == 0xa && (*(tag + 1) & 0xf) == 0xa
             && (*(tag + 2) & 0xf) == 0xa && (*(tag + 3) & 0xf) == 0xa)
-        return LSQVER_RESVED;
+        return LSQVER_RESVED; /* 保留标识, 即所有字节的低4位都为1010, 即0x?a?a?a?a */
     return N_LSQVER;
 }
 

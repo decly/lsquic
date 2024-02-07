@@ -199,6 +199,7 @@ lsquic_mm_put_packet_in (struct lsquic_mm *mm,
     }
 
 #if LSQUIC_USE_POOLS
+    /* 释放到free链表中, 分配时可以直接使用 */
     TAILQ_INSERT_HEAD(&mm->free_packets_in, packet_in, pi_next);
 #else
     lsquic_malo_put(packet_in);
@@ -206,6 +207,7 @@ lsquic_mm_put_packet_in (struct lsquic_mm *mm,
 }
 
 
+/* 分配一个lsquic_packet_in结构 */
 struct lsquic_packet_in *
 lsquic_mm_get_packet_in (struct lsquic_mm *mm)
 {
@@ -214,6 +216,7 @@ lsquic_mm_get_packet_in (struct lsquic_mm *mm)
     fiu_do_on("mm/packet_in", FAIL_NOMEM);
 
 #if LSQUIC_USE_POOLS
+    /* 优先从释放的获取 */
     packet_in = TAILQ_FIRST(&mm->free_packets_in);
     if (packet_in)
     {

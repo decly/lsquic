@@ -11,8 +11,8 @@
 /* 所有帧类型, 对应的类型值为lsquic_iquic_byte2type数组(iquic) */
 enum quic_frame_type
 {
-    QUIC_FRAME_INVALID,
-    QUIC_FRAME_STREAM,              /* B *//* 流帧, 明确地创建一条流并携带流数据 */
+    QUIC_FRAME_INVALID,             /* 非法类型 */
+    QUIC_FRAME_STREAM,              /* B *//* 流帧, 用于携带流数据, 同时也明确地创建一条流 */
     QUIC_FRAME_ACK,                 /* B *//* ACK帧, 通知发送方其发出的数据包已经收到并处理完成 */
     QUIC_FRAME_PADDING,             /* B */
     QUIC_FRAME_RST_STREAM,          /* B *//* 流重置帧, 表示立即关闭流的发送部分(是单方向的) */
@@ -23,12 +23,14 @@ enum quic_frame_type
     QUIC_FRAME_STOP_WAITING,        /* G */
     QUIC_FRAME_PING,                /* B */
     QUIC_FRAME_MAX_DATA,            /* I *//* 最大数据量帧, 用于流量控制，告知对端可以在整个连接上发送的最大数据量 */
-    QUIC_FRAME_MAX_STREAM_DATA,     /* I *//* 最大流数据量帧, 用于流量控制中通知对端一条流上可以发送的最大数据量 */
+    QUIC_FRAME_MAX_STREAM_DATA,     /* I *//* 最大流数据量帧, 用于流量控制中通知对端一条流上可以发送的最大数据量
+                                            * 应用消费完数据，缓冲区可用之后可发送MAX_STREAM_DATA帧以允许对端发送更多数据
+                                            */
     QUIC_FRAME_MAX_STREAMS,         /* I *//* 最大流帧, 用于告知对端连接允许打开给定类型(单向流或双向流)的流的累积数量(不是并发数量) */
     QUIC_FRAME_STREAM_BLOCKED,      /* I *//* 流数据阻塞帧, 发送方应该在其希望发送数据却因流级流量控制而无法发送时，发送流数据阻塞帧 */
     QUIC_FRAME_STREAMS_BLOCKED,     /* I *//* 流阻塞帧, 发送方应该在其希望打开一条流但是被对端设置的最大流上限(QUIC_FRAME_MAX_STREAMS)所限制时，发送流阻塞帧 */
     QUIC_FRAME_NEW_CONNECTION_ID,   /* I */
-    QUIC_FRAME_STOP_SENDING,        /* I */
+    QUIC_FRAME_STOP_SENDING,        /* I *//* 停止发送帧, 接收到STOP_SENDING意味着对端不会再从该流接收数据 */
     QUIC_FRAME_PATH_CHALLENGE,      /* I */
     QUIC_FRAME_PATH_RESPONSE,       /* I */
     QUIC_FRAME_CRYPTO,              /* B */
@@ -163,10 +165,12 @@ enum packno_bits
 };
 
 
+/* 长包头数据包类型 */
 enum header_type
 {
     HETY_NOT_SET,                   /* This value must be zero */
     HETY_SHORT = HETY_NOT_SET,      /* This value must be zero */
+                                    /* 默认为0, 短包头 */
     HETY_VERNEG,
     HETY_INITIAL,
     HETY_RETRY,

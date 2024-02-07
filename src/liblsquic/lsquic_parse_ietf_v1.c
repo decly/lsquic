@@ -64,6 +64,9 @@ ietf_v1_parse_packet_in_finish (lsquic_packet_in_t *packet_in,
     /* Packet number is set to an invalid value.  The packet number must
      * be decrypted, which happens later.
      */
+    /* iquic的包号是0到2^62^-1范围内的整数, 加密的
+     * 这里通过设置为一个非法值来触发后续的解密
+     */
     packet_in->pi_packno        = 1ULL << 62;
 }
 
@@ -315,6 +318,7 @@ ietf_v1_packout_size (const struct lsquic_conn *lconn,
 {
     size_t sz;
 
+    /* 头部的大小 */
     if ((lconn->cn_flags & LSCONN_HANDSHAKE_DONE)
                                 && packet_out->po_header_type == HETY_SHORT)
         sz = ietf_v1_packout_header_size_short(packet_out->po_flags,
@@ -532,7 +536,7 @@ ietf_v1_parse_stream_frame (const unsigned char *buf, size_t rem_packet_sz,
     int r;
 
     CHECK_SPACE(1, p, pend);
-    const char type = *p++; /* 首字节类型 */
+    const char type = *p++; /* 首字节为帧类型 */
 
     r = vint_read(p, pend, &stream_id); /* 获取stream id, 长度为r */
     if (r < 0)
@@ -563,11 +567,12 @@ ietf_v1_parse_stream_frame (const unsigned char *buf, size_t rem_packet_sz,
         data_sz = pend - p; /* len位为0时, len为数据包剩余所有字节 */
 
     /* Largest offset cannot exceed this value and we MUST detect this error */
+    /* 流上可传输的最大偏移量(偏移量和数据长度的总和)不能超过2^62^-1 */
     if (VINT_MAX_VALUE - offset < data_sz)
         return -1;
 
     stream_frame->stream_id             = stream_id;
-    stream_frame->data_frame.df_fin     = type & 0x1;
+    stream_frame->data_frame.df_fin     = type & 0x1; /* type最低位为FIN */
     stream_frame->data_frame.df_offset  = offset;
     stream_frame->data_frame.df_size    = data_sz;
     stream_frame->data_frame.df_data    = p;
@@ -1151,10 +1156,15 @@ ietf_v1_parse_frame_type (const unsigned char *buf, size_t len)
     uint64_t val;
     int s;
 
-    /* 首个字节为帧类型, 直接通过数组索引得到类型 */
+    /* 帧类型从帧的首个字节开始
+     * 为可变长整数编码, 但要求必须使用尽可能短的编码
+     */
+
+    /* 首字节<0x40说明帧类型只有1字节, 直接通过数组索引得到类型 */
     if (len > 0 && buf[0] < 0x40)
         return lsquic_iquic_byte2type[buf[0]];
 
+    /* 不然就读取可变长整数到val, 这个if确认val值必须是最短的编码 */
     s = vint_read(buf, buf + len, &val);
     if (s > 0 && (unsigned) s == (1u << vint_val2bits(val)))
         switch (val)
@@ -1754,6 +1764,7 @@ enforce_initial_dcil (enum lsquic_version version)
 #endif
 
 
+/* 解析iquic长包头数据包 */
 int
 lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
                 size_t length, int is_server, unsigned cid_len,
@@ -1761,12 +1772,13 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
 {
     const unsigned char *p = packet_in->pi_data;
     const unsigned char *const end = p + length;
-    enum header_type header_type;
+    enum header_type header_type; /* 数据包类型 */
     unsigned dcil, scil;
     int r;
     unsigned char first_byte;
     uint64_t payload_len, token_len;
 
+    /* 长包头6字节到DCID length字段 */
     if (length < 6)
         return -1;
     first_byte = *p++;
@@ -1784,7 +1796,7 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
         else
             header_type = bits2ht[ (first_byte >> 4) & 3 ]; /* 长数据包类型 */
     }
-    else
+    else /* 版本协商 */
         header_type = HETY_VERNEG;
 
     packet_in->pi_header_type = header_type;
@@ -1794,7 +1806,7 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
         return -1;
     if (dcil)
     {
-        memcpy(packet_in->pi_dcid.idbuf, p, dcil);
+        memcpy(packet_in->pi_dcid.idbuf, p, dcil); /* 保存DCID */
         packet_in->pi_flags |= PI_CONN_ID;
         p += dcil;
     }
@@ -1805,8 +1817,8 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
         return -1;
     if (scil)
     {
-        packet_in->pi_scid_off = p - packet_in->pi_data;
-        p += scil;
+        packet_in->pi_scid_off = p - packet_in->pi_data; /* 保存SCID的偏移量 */
+        p += scil; /* 现在p指向了SCID之后 */
     }
     packet_in->pi_scid_len = scil;
 
@@ -1821,9 +1833,10 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
         }
         else
 #endif
+        /* 客户端发的初始的DCID不能小于8字节 */
         if (is_server && dcil < MIN_INITIAL_DCID_LEN)
             return -1;
-        r = vint_read(p, end, &token_len);
+        r = vint_read(p, end, &token_len); /* 读取可变长整数 token_len */
         if (r < 0)
             return -1;
         if (token_len && !is_server)
@@ -1838,9 +1851,13 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
              *  Length field MUST either discard the packet or generate
              *  a connection error of type PROTOCOL_VIOLATION.
              */
+            /* 客户端收到具有非零Token Length字段的Initial包,
+             * 必须要么丢弃该数据包, 要么回以类型为PROTOCOL_VIOLATION的连接错误
+             */
             return -1;
         }
         p += r;
+        /* token_len非零则解析token */
         if (token_len)
         {
             if (token_len >=
@@ -1850,29 +1867,31 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
                 return -1;
             packet_in->pi_token = p - packet_in->pi_data;
             packet_in->pi_token_size = token_len;
-            p += token_len;
+            p += token_len; /* 指到了负载长度length */
         }
         /* fall-through */
     case HETY_HANDSHAKE:
     case HETY_0RTT:
         if (p >= end)
             return -1;
+        /* 读取可变长整数length, 即数据包剩余部分的长度 */
         r = vint_read(p, end, &payload_len);
         if (r < 0)
             return -1;
-        p += r;
+        p += r; /* 包号位置 */
         if (p - packet_in->pi_data + payload_len > length)
             return -1;
-        length = p - packet_in->pi_data + payload_len;
+        length = p - packet_in->pi_data + payload_len; /* 整个quic包大小 */
         if (end - p < 4)
             return -1;
-        state->pps_p      = p - r;
-        state->pps_nbytes = r;
-        packet_in->pi_quic_ver = 1;
+        state->pps_p      = p - r; /* 指向了包号前的length? */
+        state->pps_nbytes = r; /* 保存length的长度? */
+        packet_in->pi_quic_ver = 1; /* 版本号的偏移固定为1 */
         break;
     case HETY_RETRY:
         if (p >= end)
             return -1;
+        /* 客户端必须丢弃带有零长度Retry Token字段的Retry包 */
         if (p
             /* [draft-ietf-quic-transport-25] Section 17.2.5 says that "a
              * client MUST discard a Retry packet with a zero-length Retry
@@ -1880,24 +1899,26 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
              */
             + 1
             /* Integrity tag length: */
-            + 16 > end)
+            + 16 > end) /* Retry Integrity Tag为16字节 */
                 return -1;
-        packet_in->pi_token = p - packet_in->pi_data;
-        packet_in->pi_token_size = end - p - 16;
+        packet_in->pi_token = p - packet_in->pi_data; /* 记录token的位置 */
+        packet_in->pi_token_size = end - p - 16; /* token的大小(token后还有一个16字节的Retry Integrity Tag) */
         /* Tag validation happens later */
-        p = end;
+        p = end; /* retry包消耗掉整个UDP报文 */
         length = end - packet_in->pi_data;
         state->pps_p      = NULL;
         state->pps_nbytes = 0;
         packet_in->pi_quic_ver = 1;
         break;
-    default:
+    default: /* 只能是版本协商包 */
         assert(header_type == HETY_VERNEG);
+        /* 版本协商包的数据部分都是4字节的版本号, 需要对齐4字节 */
         if (p >= end || (3 & (uintptr_t) (end - p)))
             return -1;
+        /* 将版本偏移指向数据部分带的版本号 */
         packet_in->pi_quic_ver = p - packet_in->pi_data;
-        p = end;
-        state->pps_p      = NULL;
+        p = end; /* 版本协商包会消耗整个UDP报文 */
+        state->pps_p      = NULL; /* 版本协商包不带包号 */
         state->pps_nbytes = 0;
         break;
     }
@@ -1913,6 +1934,10 @@ lsquic_ietf_v1_parse_packet_in_long_begin (struct lsquic_packet_in *packet_in,
 
     /* Packet number is set to an invalid value.  The packet number must
      * be decrypted, which happens later.
+     */
+    /* iquic的包号是0到2^62^-1范围内的整数, 加密的
+     * 这里通过设置为一个非法值来触发后续的解密
+     * (解码在process_regular_packet()->iquic_esf_decrypt_packet()->strip_hp())
      */
     packet_in->pi_packno        = 1ULL << 62;
 
@@ -2013,6 +2038,7 @@ lsquic_is_valid_ietf_v1_or_Q046plus_hs_packet (const unsigned char *buf,
 }
 
 
+/* 解析短包头数据包 */
 int
 lsquic_ietf_v1_parse_packet_in_short_begin (struct lsquic_packet_in *packet_in,
                 size_t length, int is_server, unsigned cid_len,
@@ -2042,8 +2068,8 @@ lsquic_ietf_v1_parse_packet_in_short_begin (struct lsquic_packet_in *packet_in,
     packet_in->pi_flags |= ((byte & 0x20) > 0) << PIBIT_SPIN_SHIFT; /* 自旋比特位 */
     packet_in->pi_flags |= (byte & 3) << PIBIT_BITS_SHIFT; /* 数据包号长度 */
 
-    packet_in->pi_header_sz     = header_sz;
-    packet_in->pi_data_sz       = length;
+    packet_in->pi_header_sz     = header_sz; /* 包头长度仅包括到DCID */
+    packet_in->pi_data_sz       = length; /* QUIC包长度, 短包头一个UDP报文只可能有一个QUIC包 */
     packet_in->pi_quic_ver      = 0;
     packet_in->pi_nonce         = 0;
     packet_in->pi_refcnt        = 0;

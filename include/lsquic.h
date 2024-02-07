@@ -45,6 +45,7 @@ extern "C" {
  * This is a list of QUIC versions that we know of.  List of supported
  * versions is in LSQUIC_SUPPORTED_VERSIONS.
  */
+/* 支持的quic版本号, 解析版本号详见lsquic_tag2ver_fast() */
 enum lsquic_version
 {
     /**
@@ -57,48 +58,48 @@ enum lsquic_version
     /**
      * Q046.  Use IETF Draft-17 compatible packet headers.
      */
-    LSQVER_046,
+    LSQVER_046,     /* 版本号为 字符串"Q046" */
 
     /**
      * Q050.  Variable-length QUIC server connection IDs.  Use CRYPTO frames
      * for handshake.  IETF header format matching invariants-06.  Packet
      * number encryption.  Initial packets are obfuscated.
      */
-    LSQVER_050,
+    LSQVER_050,     /* 版本号为 字符串"Q050" */
 
     /**
      * IETF QUIC Draft-27
      */
-    LSQVER_ID27,
+    LSQVER_ID27,    /* 版本号为 0xff00001b */
 
     /**
      * IETF QUIC Draft-29
      */
-    LSQVER_ID29,
+    LSQVER_ID29,    /* 版本号为 0xff00001d */
 
     /**
      * IETF QUIC v1.
      */
-    LSQVER_I001,
+    LSQVER_I001,    /* iquic v1版本号: 0x00000001 */
 
     /**
      * IETF QUIC v2.
      */
-    LSQVER_I002,
+    LSQVER_I002,    /* v2版本号: 0x6b3343cf */
 
     /**
      * Reserved version to trigger version negotiation.
      * [rfc9000], Section 15.
      */
-    LSQVER_RESVED,
+    LSQVER_RESVED,  /* 保留标识, 即所有字节的低4位都为1010, 即0x?a?a?a?a */
 
-    N_LSQVER,
+    N_LSQVER,       /* 表示没找到以上支持的版本号 */
 
     /**
      *  The version 0x00000000 is reserved to represent version negotiation.
      * [rfc9000], Section 15.
      */
-    LSQVER_VERNEG
+    LSQVER_VERNEG   /* 0x00000000表示版本协商 */
 };
 
 /**
@@ -664,6 +665,10 @@ struct lsquic_engine_settings {
      *
      * The default value is @ref LSQUIC_DF_RW_ONCE.
      */
+    /* 设置为true时, 在每个事件循环中, 每个QUIC连接只会执行一次读取操作和一次写入操作
+     * 这有助于平衡多个QUIC连接的负载, 避免某个特定的QUIC连接占用过多的资源
+     * 默认是关闭的.
+     */
     int             es_rw_once;
 
     /**
@@ -757,6 +762,9 @@ struct lsquic_engine_settings {
      * @ref LSQUIC_DF_INIT_MAX_STREAM_DATA_BIDI_REMOTE_CLIENT or
      * @ref LSQUIC_DF_INIT_MAX_STREAM_DATA_BIDI_REMOTE_SERVER.
      */
+    /* 设置对端发起的双向流的初始最大数据量,
+     * 默认服务端1m 客户端为0(会在lsquic_stream_new()中设置为16k)
+     */
     unsigned        es_init_max_stream_data_bidi_remote;
 
     /**
@@ -781,6 +789,7 @@ struct lsquic_engine_settings {
      * @ref LSQUIC_DF_INIT_MAX_STREAM_DATA_UNI_CLIENT or
      * @ref LSQUIC_DF_INIT_MAX_STREAM_DATA_UNI_SERVER.
      */
+    /* 设置对端发起的单向流的初始最大数据量(类似接收窗口), 默认服务端12k 客户端32k */
     unsigned        es_init_max_stream_data_uni;
 
     /**
@@ -1072,6 +1081,12 @@ struct lsquic_engine_settings {
      * as a result of an engine shutdown.)
      *
      * Default value is @ref LSQUIC_DF_DELAY_ONCLOSE
+     */
+    /* 参数设置为true时, lsquic引擎将在关闭连接时延迟一段时间
+     * 这意味着在调用lsquic_engine_process_conns()函数时, 尽管连接已经被标记为关闭,
+     * 但是在一段时间后才会真正被清理掉(直到对端确认了所有发送的数据)。
+     * 主要是为了处理那些在连接关闭后仍然可能到达的数据包。
+     * 默认关闭
      */
     int             es_delay_onclose;
 

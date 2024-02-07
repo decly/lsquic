@@ -512,6 +512,7 @@ lsquic_stream_new (lsquic_stream_id_t id,
         stream->sm_get_packet_for_stream = stream_get_packet_for_stream_0rtt;
     }
 
+    /* 初始化stream的流控 */
     lsquic_sfcw_init(&stream->fc, initial_window, cfcw, conn_pub, id);
     stream->max_send_off = initial_send_off;
     LSQ_DEBUG("created stream");
@@ -1059,9 +1060,12 @@ lsquic_stream_update_sfcw (lsquic_stream_t *stream, uint64_t max_off)
 {
     struct lsquic_conn *lconn;
 
-    if (max_off > lsquic_sfcw_get_max_recv_off(&stream->fc) &&
-                    !lsquic_sfcw_set_max_recv_off(&stream->fc, max_off))
-    {
+    if (max_off > lsquic_sfcw_get_max_recv_off(&stream->fc) && /* 若小于此前收到的偏移则肯定能接收 */
+                    !lsquic_sfcw_set_max_recv_off(&stream->fc, max_off)) /* stream及连接流控检查, 返回0说明超过了 */
+    { /* 超出流控了 */
+        /* 如果发送方违反了通告的连接或流上的数据限额,
+         * 则接收方必须以FLOW_CONTROL_ERROR类型的错误关闭连接
+         */
         if (stream->sm_bflags & SMBF_IETF)
         {
             lconn = stream->conn_pub->lconn;
@@ -1076,17 +1080,19 @@ lsquic_stream_update_sfcw (lsquic_stream_t *stream, uint64_t max_off)
         }
         return -1;
     }
+    /* 尝试接收窗口的调整 */
     if (lsquic_sfcw_fc_offsets_changed(&stream->fc))
     {
         if (!(stream->sm_qflags & SMQF_SENDING_FLAGS))
             TAILQ_INSERT_TAIL(&stream->conn_pub->sending_streams, stream,
                                                     next_send_stream);
-        stream->sm_qflags |= SMQF_SEND_WUF;
+        stream->sm_qflags |= SMQF_SEND_WUF; /* 要发送窗口更新的帧 */
     }
     return 0;
 }
 
 
+/* 接收STREAM帧 */
 int
 lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
 {
@@ -1108,6 +1114,7 @@ lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
         goto release_packet_frame;
     }
 
+    /* 之前已经收到了FIN, 又收到了FIN但是数据偏移不一样, 直接丢弃 */
     if (frame->data_frame.df_fin && (stream->sm_bflags & SMBF_IETF)
             && (stream->stream_flags & STREAM_FIN_RECVD)
             && stream->sm_fin_off != DF_END(frame))
@@ -1120,19 +1127,22 @@ lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
         goto release_packet_frame;
     }
 
+    /* 流帧数据刚好为下一个要读取的 */
     got_next_offset = frame->data_frame.df_offset == stream->read_offset;
   insert_frame:
+    /* 这里将帧数据保存在data_in中 */
     ins_frame = stream->data_in->di_if->di_insert_frame(stream->data_in, frame, stream->read_offset);
     if (INS_FRAME_OK == ins_frame)
     {
         /* Update maximum offset in the flow controller and check for flow
          * control violation:
          */
-        free_frame = !stream->data_in->di_if->di_own_on_ok;
-        max_off = frame->data_frame.df_offset + frame->data_frame.df_size;
+        free_frame = !stream->data_in->di_if->di_own_on_ok; /* 为1则需要释放帧 */
+        max_off = frame->data_frame.df_offset + frame->data_frame.df_size; /* 帧数据尾部 */
+        /* 流控(接收窗口)检查: 帧数据不能超出stream及连接流控限制 */
         if (0 != lsquic_stream_update_sfcw(stream, max_off))
             goto end_ok;
-        if (frame->data_frame.df_fin)
+        if (frame->data_frame.df_fin) /* 收到了FIN处理 */
         {
             SM_HISTORY_APPEND(stream, SHE_FIN_IN);
             stream->stream_flags |= STREAM_FIN_RECVD;
@@ -1144,6 +1154,7 @@ lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
             goto end_ok;
         if (got_next_offset)
             /* Checking the offset saves di_get_frame() call */
+            /* 检查有帧数据可被接收, 将连接加入conns_tickable队列中 */
             maybe_conn_to_tickable_if_readable(stream);
         rv = 0;
   end_ok:
@@ -1153,12 +1164,13 @@ lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
         return rv;
     }
     else if (INS_FRAME_DUP == ins_frame)
-    {
+    { /* 数据完全重复, 释放掉帧和包 */
         rv = 0;
     }
     else if (INS_FRAME_OVERLAP == ins_frame)
-    {
+    { /* 数据部分重叠了, 使用hash data来插入 */
         LSQ_DEBUG("overlap: switching DATA IN implementation");
+        /* 将原来lsquic_stream->data_in的nocopy_data_in释放用hash_data_in代替 */
         stream->data_in = stream->data_in->di_if->di_switch_impl(
                                     stream->data_in, stream->read_offset);
         if (stream->data_in)

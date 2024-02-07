@@ -13,11 +13,11 @@ struct lsquic_cid;
 
 struct data_frame
 {
-    const unsigned char *df_data;       /* Pointer to data *//* 指向数据部分 */
-    uint64_t             df_offset;     /* Stream offset *//* 偏移(0x04位) */
-    uint16_t             df_read_off;   /* Read offset */
-    uint16_t             df_size;       /* Size of df_data *//* 数据长度(0x02位) */
-    signed char          df_fin;        /* FIN? *//* FIN标志(0x01位) */
+    const unsigned char *df_data;       /* Pointer to data *//* 指向流帧中的数据 */
+    uint64_t             df_offset;     /* Stream offset *//* 流数据偏移(type的0x04位) */
+    uint16_t             df_read_off;   /* Read offset *//* 当前上层读取到该帧的偏移, 没有则是0 */
+    uint16_t             df_size;       /* Size of df_data *//* 流帧中的数据长度(type的0x02位) */
+    signed char          df_fin;        /* FIN? *//* FIN标志(设置了type的0x01位) */
 };
 
 
@@ -44,7 +44,7 @@ typedef struct stream_frame /* 表示一个流帧(QUIC_FRAME_STREAM) */
 #define DF_ROFF(frame) (DF_OFF(frame) + (frame)->data_frame.df_read_off)
 #define DF_FIN(frame) (frame)->data_frame.df_fin
 #define DF_SIZE(frame) (frame)->data_frame.df_size
-#define DF_END(frame) (DF_OFF(frame) + DF_SIZE(frame))
+#define DF_END(frame) (DF_OFF(frame) + DF_SIZE(frame)) /* 帧的数据尾部偏移 */
 
 
 typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_packet_in) */
@@ -53,10 +53,20 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
     lsquic_time_t                   pi_received;   /* Time received *//* 包的接收时间 */
     lsquic_cid_t                    pi_dcid;       /* 目的cid */
 #define pi_conn_id pi_dcid
-    lsquic_packno_t                 pi_packno;
-    enum quic_ft_bit                pi_frame_types;
+    lsquic_packno_t                 pi_packno;     /* 包号
+                                                    * 接收时一开始先初始化为一个非法值(1ULL << 62)
+                                                    * 然后在 process_regular_packet()
+                                                    *          ->iquic_esf_decrypt_packet()
+                                                    *            ->strip_hp() 中解码
+                                                    */
+    enum quic_ft_bit                pi_frame_types;/* 数据包携带的帧类型, 按位或, 可能携带多种帧 */
     unsigned short                  pi_header_sz;  /* Points to payload *//* 包头大小 */
-    unsigned short                  pi_data_sz;    /* Data plus header *//* 包大小 */
+                                                   /* 最终都包括完整首部(包含到包号字段)
+                                                    * 但是一开始解析过程中不包括包号(即只包括到包号字段之前),
+                                                    * 等到包号解码后才包含包号(iquic_esf_decrypt_packet()中)
+                                                    * 特例: retry/版本协商包包含了整个UDP报文(这两种包没有包号字段)
+                                                    */
+    unsigned short                  pi_data_sz;    /* Data plus header *//* quic包大小 */
     /* A packet may be referred to by one or more frames and packets_in
      * list.
      */
@@ -66,13 +76,15 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
                                                     * PI_HSK_STREAM is set.
                                                     */
     enum {
-        PI_DECRYPTED    = (1 << 0),
+        PI_DECRYPTED    = (1 << 0),                /* 表示数据包已经解码 */
         PI_OWN_DATA     = (1 << 1),                /* We own pi_data */
         PI_CONN_ID      = (1 << 2),                /* pi_conn_id is set */
                                                    /* 表示获取了目的cid(pi_dcid) */
         PI_HSK_STREAM   = (1 << 3),                /* Has handshake data (mini only) */
         PI_FROM_MINI    = (1 << 4),                /* Handed off by mini connection */
-#define PIBIT_ENC_LEV_SHIFT 5
+#define PIBIT_ENC_LEV_SHIFT 5                      /* 下面这两位是包加密的等级, 不同包类型等级不同
+                                                    * 根据hety2el数组对应等级
+                                                    */
         PI_ENC_LEV_BIT_0= (1 << 5),                /* Encodes encryption level */
         PI_ENC_LEV_BIT_1= (1 << 6),                /*  (see enum enc_level). */
         PI_GQUIC        = (1 << 7),                /* 表示gquic的数据包, 不设置即iquic */
@@ -81,21 +93,28 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
         PI_ECN_BIT_0    = (1 << 9),
         PI_ECN_BIT_1    = (1 <<10),
 #define PIBIT_SPIN_SHIFT 11
-        PI_SPIN_BIT     = (1 <<11),
+        PI_SPIN_BIT     = (1 <<11),                 /* 短包头中设置了自旋比特位 */
 #define PIBIT_BITS_SHIFT 12
-        PI_BITS_BIT_0   = (1 <<12),
-        PI_BITS_BIT_1   = (1 <<13),
+        PI_BITS_BIT_0   = (1 <<12),                 /* 首字节的最低两位 */
+        PI_BITS_BIT_1   = (1 <<13),                 /* 这两位在短包头中表示包号长度 */
         /* Square bit and loss bit flags are used for logging */
         PI_LOG_QL_BITS  = (1 <<14),
         PI_SQUARE_BIT   = (1 <<15),
         PI_LOSS_BIT     = (1 <<16),
-        PI_VER_PARSED   = (1 <<17),                 /* 解析到quic版本 */
+        PI_VER_PARSED   = (1 <<17),                 /* 解析到quic版本, 保存到pi_version */
         PI_FIRST_INIT   = (1 <<18),                 /* 首个初始包 */
     }                               pi_flags;
     /* pi_token and pi_token_size are set in Initial and Retry packets */
     unsigned short                  pi_token_size; /* Size of the token */
+                                                   /* initial/retry包携带的token(即pi_token)的长度 */
     unsigned short                  pi_pkt_size;   /* Size of the whole packet */
+                                                   /* 整个UDP报文的大小, 即如果一个UDP报文中
+                                                    * 有多个QUIC包也为整体UDP的大小
+                                                    */
     unsigned char                   pi_token;      /* Offset to token */
+                                                   /* initial/retry包携带的token在包中的偏移, 即pi_data + pi_token
+                                                    * 没有则为0
+                                                    */
     /* pi_odcid and pi_odcid_len are only set in Retry packets for I-D < 25 */
     unsigned char                   pi_odcid;      /* Offset to Original DCID */
     unsigned char                   pi_odcid_len;  /* Size of ODCID */
@@ -104,16 +123,21 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
     unsigned char                   pi_scid_len;   /* Size of SCID */
                                                    /* 源cid的长度, cid的偏移量为pi_scid_off */
     unsigned char                   pi_quic_ver;   /* Offset to QUIC version */
-                                                   /* quic版本在包首部的偏移 */
+                                                   /* 长包头为quic版本在包首部的偏移
+                                                    * (特例:版本协商包指向携带的版本号)
+                                                    * 短包头为0
+                                                    */
     unsigned char                   pi_nonce;      /* Offset to nonce */
-    enum header_type                pi_header_type:8; /* 长包头数据包类型(短包头初始化0) */
+    enum header_type                pi_header_type:8; /* 长包头数据包类型: enum header_type
+                                                       * 短包头初始化0
+                                                       */
     unsigned char                   pi_path_id;    /* 该包的网络路径(v4/v6+四元组)对应连接ifc_paths中的索引 */
     unsigned char                   pi_version;    /* parsed enum lsquic_version */
                                                    /* quic的版本, 值为enum lsquic_version */
     /* If PI_OWN_DATA flag is not set, `pi_data' points to user-supplied
      * packet data, which is NOT TO BE MODIFIED.
      */
-    unsigned char                  *pi_data;    /* 包的实体数据, 从包首部开始 */
+    unsigned char                  *pi_data;        /* 包的实体数据, 从包首部开始 */
 } lsquic_packet_in_t;
 
 

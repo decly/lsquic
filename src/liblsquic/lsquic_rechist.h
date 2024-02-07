@@ -28,14 +28,19 @@ struct lsquic_rechist { /* 管理接收到的包号区间 */
                                                  * 然后每个区间的re_next指向下一个区间的索引,
                                                  * 最后一个的re_next为UINT_MAX
                                                  */
-    uintptr_t                      *rh_masks;
+    uintptr_t                      *rh_masks;       /* 位掩码, 用来表示rh_elems中那些项被使用了 */
     lsquic_packno_t                 rh_cutoff;
     lsquic_time_t                   rh_largest_acked_received;  /* 最大包号接收的时间 */
     unsigned                        rh_n_masks;
-    unsigned                        rh_n_alloced;
-    unsigned                        rh_n_used;
-    unsigned                        rh_head;    /* 首个包号区间(最大包号)在rh_elems的数组索引 */
-    unsigned                        rh_max_ranges;
+    unsigned                        rh_n_alloced;   /* rh_elems分配的个数, 初始为4, 用满了扩大一倍分配 */
+    unsigned                        rh_n_used;      /* rh_elems使用的个数 */
+    unsigned                        rh_head;        /* 首个包号区间(最大包号)在rh_elems的数组索引
+                                                     * 所以是从rh_elems[rh_head]开始遍历的
+                                                     */
+    unsigned                        rh_max_ranges;  /* rh_elems最大可分配个数, 即rh_n_alloced的上限
+                                                     * iquic中根据不同包空间不一样:
+                                                     * PNS_INIT/PNS_HSK为10, PNS_APP为1000
+                                                     */
     enum {
         RH_CUTOFF_SET   = (1 << 0),
     }                               rh_flags;

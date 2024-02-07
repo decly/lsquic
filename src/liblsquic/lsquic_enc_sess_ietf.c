@@ -2099,6 +2099,7 @@ iquic_esfi_destroy (enc_session_t *enc_session_p)
 
 
 /* See [draft-ietf-quic-tls-14], Section 4 */
+/* 加密的等级: 索引为包类型, 值为等级 */
 static const enum enc_level hety2el[] =
 {
     [HETY_SHORT]     = ENC_LEV_APP,
@@ -2390,6 +2391,7 @@ iquic_esf_decrypt_packet (enc_session_t *enc_session_p,
         goto err;
     }
     memcpy(dst, packet_in->pi_data, sample_off);
+    /* 这里解码得到包号 */
     packet_in->pi_packno =
     packno = strip_hp(enc_sess, hp,
         packet_in->pi_data + sample_off,
@@ -2475,6 +2477,7 @@ iquic_esf_decrypt_packet (enc_session_t *enc_session_p,
 #endif
     *((uint64_t *) begin_xor) ^= packno;
 
+    /* 头部长度加上包号, 这时包括了完整头部, 即指向数据部分 */
     packet_in->pi_header_sz += packno_len;
 
     if (s_log_seal_and_open)

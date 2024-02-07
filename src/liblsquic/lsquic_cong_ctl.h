@@ -67,6 +67,7 @@ struct cong_ctl_if
     void
     (*cci_timeout) (void *cong_ctl);
 
+    /* 在之前数据包都被确认后, 新一轮的数据发送后被确认时被调用(类似TX_START) */
     void
     (*cci_was_quiet) (void *cong_ctl, lsquic_time_t now, uint64_t in_flight);
 

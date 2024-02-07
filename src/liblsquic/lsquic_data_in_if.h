@@ -15,10 +15,10 @@ struct stream_frame;
 
 enum ins_frame
 {
-    INS_FRAME_OK,
-    INS_FRAME_ERR,
-    INS_FRAME_DUP,
-    INS_FRAME_OVERLAP,
+    INS_FRAME_OK,       /* 正常 */
+    INS_FRAME_ERR,      /* 出错 */
+    INS_FRAME_DUP,      /* 插入帧数据完全重复 */
+    INS_FRAME_OVERLAP,  /* 插入帧数据部分重叠 */
 };
 
 
@@ -39,10 +39,12 @@ struct data_in_iface
      * again or to treat this as an error.  Either way, the caller retains
      * control of the frame.
      */
+    /* 缓存插入帧数据 */
     enum ins_frame
     (*di_insert_frame) (struct data_in *, struct stream_frame *,
                                                         uint64_t read_offset);
 
+    /* 获取data_in中可被上层接收的第一个帧 */
     struct data_frame *
     (*di_get_frame) (struct data_in *, uint64_t read_offset);
 
@@ -76,7 +78,10 @@ struct data_in_iface
 
 struct data_in
 {
-    const struct data_in_iface  *di_if;
+    const struct data_in_iface  *di_if;     /* 数据的操作函数集
+                                             * 不使用SCF_USE_DI_HASH的话指向di_if_nocopy
+                                             * 使用则指向di_if_hash_ptr
+                                             */
     enum {
         /* If DI_SWITCH_IMPL is set, switching data_in implementation is
          * recommended in order to get better performance for current

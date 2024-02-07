@@ -33,14 +33,15 @@ lsquic_sfcw_init (struct lsquic_sfcw *fc, unsigned max_recv_window,
                   lsquic_stream_id_t stream_id)
 {
     memset(fc, 0, sizeof(*fc));
-    fc->sf_max_recv_win = max_recv_window;
-    fc->sf_cfcw = cfcw;
+    fc->sf_max_recv_win = max_recv_window; /* 初始的接收窗口 */
+    fc->sf_cfcw = cfcw; /* 连接的流控 */
     fc->sf_conn_pub = cpub;
     fc->sf_stream_id = stream_id;
     (void) lsquic_sfcw_fc_offsets_changed(fc);
 }
 
 
+/* 增加接收窗口大小, new = old * 2 */
 static void
 sfcw_maybe_increase_max_window (struct lsquic_sfcw *fc)
 {
@@ -94,11 +95,16 @@ lsquic_sfcw_fc_offsets_changed (struct lsquic_sfcw *fc)
 {
     lsquic_time_t since_last_update, srtt, now;
 
+    /* 这里控制在上层读取 接收窗口的一半 后再调整接收窗口和接收的偏移边界
+     * 因为 这里sf_recv_off不变, 而sf_read_off随便上层读取数据而增加,
+     * 所以 sf_recv_off - sf_read_off 越来越小, 直到小于接收窗口的一半(sf_max_recv_win/2)
+     * 才进行下面的扩大接收窗口
+     */
     if (fc->sf_recv_off - fc->sf_read_off >= fc->sf_max_recv_win / 2)
     {
         LSQ_DEBUG("recv_off has not changed, still at %"PRIu64,
                                                             fc->sf_recv_off);
-        return 0;
+        return 0; /* 不调整接收窗口 */
     }
 
     now = lsquic_time_now();
@@ -106,9 +112,13 @@ lsquic_sfcw_fc_offsets_changed (struct lsquic_sfcw *fc)
     fc->sf_last_updated = now;
 
     srtt = lsquic_rtt_stats_get_srtt(&fc->sf_conn_pub->rtt_stats);
+    /* 这里尝试扩大接收窗口: 只有在2个rtt时间内读取接收窗口一半以上的数据 才会扩大窗口
+     * 每次增加扩大一倍: new = old * 2
+     */
     if (since_last_update < srtt * 2)
         sfcw_maybe_increase_max_window(fc);
 
+    /* 设置新的合法偏移的边界 */
     fc->sf_recv_off = fc->sf_read_off + fc->sf_max_recv_win;
     LSQ_DEBUG("recv_off changed: read_off: %"PRIu64"; "
         "recv_off: %"PRIu64, fc->sf_read_off, fc->sf_recv_off);
@@ -116,26 +126,28 @@ lsquic_sfcw_fc_offsets_changed (struct lsquic_sfcw *fc)
 }
 
 
+/* 检查接收数据是否超出流控(包括stream和连接粒度流控), 返回1为正常, 0为超出 */
 int
 lsquic_sfcw_set_max_recv_off (struct lsquic_sfcw *fc, uint64_t max_recv_off)
 {
-    if (max_recv_off <= fc->sf_recv_off)
+    if (max_recv_off <= fc->sf_recv_off) /* 在stream流控范围内 */
     {
+        /* 检查是否超出连接流控 */
         if (!fc->sf_cfcw || lsquic_cfcw_incr_max_recv_off(fc->sf_cfcw,
                                         max_recv_off - fc->sf_max_recv_off))
         {
             LSQ_DEBUG("max_recv_off goes from %"PRIu64" to %"PRIu64,
                                             fc->sf_max_recv_off, max_recv_off);
             fc->sf_max_recv_off = max_recv_off;
-            return 1;
+            return 1; /* 没超出stream以及连接流控, 正常 */
         }
-        else
+        else /* 超出连接流控 */
         {
             /* cfcw prints its own warning */
             return 0;
         }
     }
-    else
+    else /* 超出stream流控 */
     {
         LSQ_INFO("flow control violation: received at offset %"PRIu64", "
             "while flow control receive offset is %"PRIu64,
