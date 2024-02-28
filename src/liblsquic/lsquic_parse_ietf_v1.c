@@ -678,7 +678,7 @@ ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
     if (UNLIKELY(r < 0))
         return -1;
     p += r;
-    r = vint_read(p, end, &block); /* first_ack_range, 即range[0]的长度 */
+    r = vint_read(p, end, &block); /* first_ack_range, 即最大确认包号之前连续被确认长度(不包括最大确认包号本身) */
     if (UNLIKELY(r < 0))
         return -1;
     /* range[0]的下边界为: 最大确认包号 - first_ack_range */
@@ -694,7 +694,7 @@ ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
      *   gap为 上一个range.low 之前连续未确认的个数 - 1,
      *   即与上个range之间洞的大小 - 1(减1是因为洞至少为1, 所以gap从0开始, 即gap=0表示1个包号的洞)
      *       所以 range[i].high = range[i-1].low - gap - 2
-     *   ack_range_length为 high之前连续确认的个数
+     *   ack_range_length为 high之前连续确认的个数(不包括high)
      *       所以 range[i].low  = range[i].high - ack_range_length
      */
     for (i = 1; i <= block_count; ++i)
@@ -723,7 +723,7 @@ ietf_v1_parse_ack_frame (const unsigned char *const buf, size_t buf_len,
     if (i < sizeof(ack->ranges) / sizeof(ack->ranges[0]))
     {
         ack->flags = 0;
-        ack->n_ranges = block_count + 1;
+        ack->n_ranges = block_count + 1; /* 1(Largest Acknowledged) + ACK Range Count */
     }
     else
     {

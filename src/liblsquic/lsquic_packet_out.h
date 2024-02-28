@@ -143,7 +143,7 @@ typedef struct lsquic_packet_out
         PO_UNACKED  = (1 <<28),         /* On unacked queue *//* 在sc_unacked_packets队列中 */
         PO_LOST     = (1 <<29),         /* On lost queue *//* 在sc_lost_packets丢包队列中 */
 #define POSPIN_SHIFT 30
-        PO_SPIN_BIT = (1 <<30),         /* Value of the spin bit */
+        PO_SPIN_BIT = (1 <<30),         /* Value of the spin bit *//* 自旋比特位的值 */
     }                  po_flags;
     unsigned short     po_data_sz;      /* Number of usable bytes in data */
     unsigned short     po_enc_data_sz;  /* Number of usable bytes in data */

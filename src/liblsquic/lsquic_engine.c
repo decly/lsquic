@@ -245,18 +245,21 @@ struct lsquic_engine
     void                              *scids_ctx;
     struct lsquic_hash                *conns_hash;      /* 连接哈希表 */
     struct min_heap                    conns_tickable;	/* 需要立即被process_connections处理的连接队列(堆排序),
-							 * 按照conn->cn_last_ticked从小到大排序
-							 */
+                                                         * 按照conn->cn_last_ticked从小到大排序
+                                                         */
     struct min_heap                    conns_out;
     struct eng_hist                    history;
     unsigned                           batch_size;
     unsigned                           min_batch_size, max_batch_size;
     struct lsquic_conn                *curr_conn;
-    struct pr_queue                   *pr_queue;
-    struct attq                       *attq;		/* 定时器队列, 比如pacing先将连接加入到attq中
-    							 * 等到时间到期时再从attq中移到conns_tickable中
-							 * 详见lsquic_engine_process_conns()
-							 */
+    struct pr_queue                   *pr_queue;        /* 请求包队列,
+                                                         * 在收到对端请求包后需要回复enum packet_req_type这些类型的包时,
+                                                         * 会将请求包保存在pr_queue中, 然后在发送时统一回复(send_packets_out()->coi_init()中)
+                                                         */
+    struct attq                       *attq;            /* 定时器队列, 比如pacing先将连接加入到attq中
+                                                         * 等到时间到期时再从attq中移到conns_tickable中
+                                                         * 详见lsquic_engine_process_conns()
+                                                         */
     /* Track time last time a packet was sent to give new connections
      * priority lower than that of existing connections.
      */
@@ -1257,6 +1260,7 @@ version_matches (lsquic_engine_t *engine, const lsquic_packet_in_t *packet_in,
 }
 
 
+/* 缓存请求包, 并回复(需等到send_packets_out()中才会回复) */
 static void
 schedule_req_packet (struct lsquic_engine *engine, enum packet_req_type type,
     const struct lsquic_packet_in *packet_in, const struct sockaddr *sa_local,
@@ -3418,6 +3422,9 @@ update_busy_detector (struct lsquic_engine *engine, struct lsquic_conn *conn,
 #endif
 
 
+/* 得到所有连接中最早要处理的时间, 没有则返回0,
+ * 待处理时间保存在diff中, 可能未负数, 说明已经超时了
+ */
 int
 lsquic_engine_earliest_adv_tick (lsquic_engine_t *engine, int *diff)
 {
@@ -3455,6 +3462,7 @@ lsquic_engine_earliest_adv_tick (lsquic_engine_t *engine, int *diff)
         return 1;
     }
 
+    /* 有要回复的请求包, 直接回复(diff为0) */
     if ((engine->pub.enp_flags & ENPUB_CAN_SEND)
         && engine->pr_queue && lsquic_prq_have_pending(engine->pr_queue))
     {
@@ -3469,6 +3477,7 @@ lsquic_engine_earliest_adv_tick (lsquic_engine_t *engine, int *diff)
         return 1;
     }
 
+    /* 有需要立即被处理的连接, 也是设置diff为0 */
     if (lsquic_mh_count(&engine->conns_tickable))
     {
 #if LSQUIC_DEBUG_NEXT_ADV_TICK
@@ -3491,6 +3500,7 @@ lsquic_engine_earliest_adv_tick (lsquic_engine_t *engine, int *diff)
         return 1;
     }
 
+    /* 最后是获取定时器队列中最近要处理的连接的时间 */
     next_attq = lsquic_attq_next(engine->attq);
     if (engine->pub.enp_flags & ENPUB_CAN_SEND)
     {

@@ -636,6 +636,11 @@ lsquic_gquic_calc_packno_bits (lsquic_packno_t packno,
 
 
 /* `dst' serves both as source and destination.  `src' is the new frame */
+/* 合并dst和src的值到dst中:
+ * - 合并ranges, 若相邻或者重叠的合并为一个
+ * - ecn_counts和lack_delta取新的值, 即src的值
+ * - 合并flags
+ */
 int
 lsquic_merge_acks (struct ack_info *dst, const struct ack_info *src)
 {
@@ -655,11 +660,13 @@ lsquic_merge_acks (struct ack_info *dst, const struct ack_info *src)
     out = out_ranges;
     out_end = out + sizeof(out_ranges) / sizeof(out_ranges[0]);
 
+    /* 从最高包号range开启 */
     if (a->high >= b->high)
         *out = *a;
     else
         *out = *b;
 
+    /* 遍历合并dst和src的ranges到out, 将包号相邻或重叠的合并 */
     while (1)
     {
         if (a < a_end && b < b_end)
@@ -679,15 +686,16 @@ lsquic_merge_acks (struct ack_info *dst, const struct ack_info *src)
             break;
         }
 
-        if ((*p)->high + 1 >= out->low)
+        if ((*p)->high + 1 >= out->low) /* 相邻或者重叠, 直接改low */
             out->low = (*p)->low;
         else if (out + 1 < out_end)
-            *++out = **p;
-        else
+            *++out = **p; /* 不相邻, 则新增加一个range */
+        else /* 超过256个range了, 合并失败, 返回后会先处理旧的 */
             return -1;
         ++*p;
     }
 
+    /* 合并ECN计数: 直接使用src新的值(新的值肯定比较大, 若不是则合并失败) */
     if (src->flags & AI_ECN)
     {
         /* New ACK frame (src) should not contain ECN counts that are smaller
@@ -696,16 +704,17 @@ lsquic_merge_acks (struct ack_info *dst, const struct ack_info *src)
         ok = 1;
         for (i = 0; i < sizeof(src->ecn_counts)
                                         / sizeof(src->ecn_counts[0]); ++i)
-            ok &= dst->ecn_counts[i] <= src->ecn_counts[i];
+            ok &= dst->ecn_counts[i] <= src->ecn_counts[i]; /* src是新的ack, 值必须比较大 */
         if (ok)
             for (i = 0; i < sizeof(src->ecn_counts)
                                             / sizeof(src->ecn_counts[0]); ++i)
-                dst->ecn_counts[i] = src->ecn_counts[i];
+                dst->ecn_counts[i] = src->ecn_counts[i]; /* 使用src中新的值 */
         else
             return -1;
     }
+    /* 将合并后的out覆盖到dst中 */
     dst->flags |= src->flags;
-    dst->lack_delta = src->lack_delta;
+    dst->lack_delta = src->lack_delta; /* 处理时延使用的是新的 */
     dst->n_ranges = out - out_ranges;
     memcpy(dst->ranges, out_ranges, sizeof(out_ranges[0]) * dst->n_ranges);
 

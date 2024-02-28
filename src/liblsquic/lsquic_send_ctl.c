@@ -3566,13 +3566,15 @@ lsquic_send_ctl_maybe_calc_rough_rtt (struct lsquic_send_ctl *ctl,
     struct lsquic_packets_tailq *const *q;
     struct lsquic_packets_tailq *const queues[] = {
         &ctl->sc_lost_packets,
-        &ctl->sc_unacked_packets[pns],
+        &ctl->sc_unacked_packets[pns], /* pns为INIT */
     };
 
+    /* 已经记录rtt了, 直接返回 */
     if ((ctl->sc_flags & SC_ROUGH_RTT)
                 || lsquic_rtt_stats_get_srtt(&ctl->sc_conn_pub->rtt_stats))
         return;
 
+    /* 找到最早发送的initial包(rtt可能会偏大)来计算rtt */
     min_sent = UINT64_MAX;
     for (q = queues; q < queues + sizeof(queues) / sizeof(queues[0]); ++q)
         TAILQ_FOREACH(packet_out, *q, po_next)
@@ -3583,7 +3585,7 @@ lsquic_send_ctl_maybe_calc_rough_rtt (struct lsquic_send_ctl *ctl,
      * because now we will ignore packets that carry acknowledgements and
      * RTT estimation may be delayed.
      */
-    if (min_sent < UINT64_MAX)
+    if (min_sent < UINT64_MAX) /* 记录rtt */
     {
         rtt = lsquic_time_now() - min_sent;
         if (rtt > 500000)

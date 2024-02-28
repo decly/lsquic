@@ -2715,6 +2715,7 @@ iquic_esfi_set_iscid (enc_session_t *enc_session_p,
 
     if (!(enc_sess->esi_flags & ESI_ISCID))
     {
+        /* 保存包中的SCID */
         lsquic_scid_from_packet_in(packet_in, &enc_sess->esi_iscid);
         enc_sess->esi_flags |= ESI_ISCID;
         LSQ_DEBUGC("set ISCID to %"CID_FMT, CID_BITS(&enc_sess->esi_iscid));

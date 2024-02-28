@@ -21,7 +21,7 @@ enum stream_dir;
 
 struct ack_info /* ack帧携带的range等信息, iquic由ietf_v1_parse_ack_frame()解析 */
 {
-    enum packnum_space pns;
+    enum packnum_space pns;     /* 该ack确认的包空间(承载ACK帧的包只能确认的被确认数据包的包号空间) */
     enum { /* flags的标志 */
         AI_ECN        = 1 << 0, /* ecn_counts[1,2,3] contain ECN counts */
                                 /* 表示ack帧携带了ecn反馈信息, 保存在ecn_counts中 */
@@ -37,7 +37,9 @@ struct ack_info /* ack帧携带的range等信息, iquic由ietf_v1_parse_ack_frame()解析 
                                  * 指的是对端收到最大包号(ranges[0].high)的延迟,
                                  * 即 对端发送该ACK的时间 - 对端收到最大包号的时间
                                  */
-    uint64_t        ecn_counts[4]; /* 保存从ack帧(类型0x03)中解析的ECN计数 */
+    uint64_t        ecn_counts[4]; /* 保存从ack帧(类型0x03)中解析的ECN计数
+                                    * [0..4]分别为: 没有使用, ECT1, ECT0, ECN-CE
+                                    */
     struct lsquic_packno_range ranges[256]; /* 降序排列的range, 范围为[low, high] 包括上下边界 */
 };
 

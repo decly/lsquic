@@ -246,7 +246,7 @@ lsquic_is_valid_iquic_hs_packet (const unsigned char *buf, size_t length,
 const enum quic_frame_type lsquic_iquic_byte2type[0x40] =
 {
     [0x00] = QUIC_FRAME_PADDING,            /* PADDING帧 */
-    [0x01] = QUIC_FRAME_PING,
+    [0x01] = QUIC_FRAME_PING,               /* PING帧 */
     [0x02] = QUIC_FRAME_ACK,                /* 0x02和0x03都为ACK帧 */
     [0x03] = QUIC_FRAME_ACK,                /* 0x03 ACK帧也会包含到目前为止在该连接上收到的带有相关ECN标记的QUIC数据包的累计值 */
     [0x04] = QUIC_FRAME_RST_STREAM,         /* 流重置帧 */

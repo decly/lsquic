@@ -59,6 +59,7 @@ enum send_ctl_flags {
 #endif
 };
 
+/* 发送相关控制层, 由struct ietf_full_conn->ifc_send_ctl指向 */
 typedef struct lsquic_send_ctl {
     /* The first section consists of struct members which are used in the
      * time-critical lsquic_send_ctl_got_ack() in the approximate order

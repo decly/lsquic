@@ -545,23 +545,24 @@ prog_process_conns (struct prog *prog)
     int diff;
     struct timeval timeout;
 
-    /* 处理连接 */
+    /* 处理连接的核心函数 */
     lsquic_engine_process_conns(prog->prog_engine);
 
+    /* 获取下次要处理的时间(所有连接中最近要处理的) */
     if (lsquic_engine_earliest_adv_tick(prog->prog_engine, &diff))
     {
-        if (diff < 0
-                || (unsigned) diff < prog->prog_settings.es_clock_granularity)
+        if (diff < 0 /* 已经超时了 */
+                || (unsigned) diff < prog->prog_settings.es_clock_granularity) /* 小于pacer的粒度(1ms)也直接处理 */
         {
             timeout.tv_sec  = 0;
-            timeout.tv_usec = prog->prog_settings.es_clock_granularity;
+            timeout.tv_usec = prog->prog_settings.es_clock_granularity; /* 按照1ms来调度 */
         }
-        else
+        else /* 按照最近的时间调度 */
         {
             timeout.tv_sec = (unsigned) diff / 1000000;
             timeout.tv_usec = (unsigned) diff % 1000000;
         }
-
+        /* 使用event按照timeout时间调度, 唤醒后调用prog_timer_handler() */
         if (!prog_is_stopped())
             event_add(prog->prog_timer, &timeout);
     }

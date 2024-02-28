@@ -112,7 +112,7 @@ enum ifull_conn_flags
 {
     IFC_SERVER        = LSENG_SERVER,   /* Server mode *//* 作为服务端 */
     IFC_HTTP          = LSENG_HTTP,     /* HTTP mode */
-    IFC_ACK_HAD_MISS  = 1 << 2,
+    IFC_ACK_HAD_MISS  = 1 << 2,         /* ACK丢了? */
 #define IFC_BIT_ERROR 3
     IFC_ERROR         = 1 << IFC_BIT_ERROR,
     IFC_TIMED_OUT     = 1 << 4,
@@ -128,6 +128,7 @@ enum ifull_conn_flags
                       = 1 << 13,
     IFC_DCID_SET      = 1 << 14, /* 表示客户端获取到了对端的CID(记录在CUR_DCID(conn)) */
 #define IFCBIT_ACK_QUED_SHIFT 15
+    /* 以下3个表示当前需要发送ACK帧, 分别对应INIT/HSK/APP包空间(发送ACK帧后会清除该标志) */
     IFC_ACK_QUED_INIT = 1 << 15,
     IFC_ACK_QUED_HSK  = IFC_ACK_QUED_INIT << PNS_HSK,
     IFC_ACK_QUED_APP  = IFC_ACK_QUED_INIT << PNS_APP,
@@ -324,7 +325,7 @@ struct conn_path
     struct network_path         cop_path;   /* 保存地址,对端CID,mss等路径信息 */
     uint64_t                    cop_path_chals[8];  /* Arbitrary number */
     uint64_t                    cop_inc_chal;       /* Incoming challenge */
-    lsquic_packno_t             cop_max_packno;
+    lsquic_packno_t             cop_max_packno;     /* 用于自旋比特位, 记录最大包号 */
     enum {
         /* Initialized covers cop_path.np_pack_size and cop_path.np_dcid */
         COP_INITIALIZED = 1 << 0,
@@ -337,7 +338,7 @@ struct conn_path
          */
         COP_GOT_NONPROB = 1 << 2,
         /* Spin bit is enabled on this path. */
-        COP_SPIN_BIT    = 1 << 3,
+        COP_SPIN_BIT    = 1 << 3,   /* 该路径开启了自旋比特位 */
         /* Allow padding packet to 1200 bytes */
         COP_ALLOW_MTU_PADDING = 1 << 4,
         /* Verified that the path MTU is at least 1200 bytes */
@@ -345,7 +346,7 @@ struct conn_path
     }                           cop_flags;
     unsigned char               cop_n_chals;
     unsigned char               cop_cce_idx;
-    unsigned char               cop_spin_bit;
+    unsigned char               cop_spin_bit;   /* 自旋值, 发包时设置该值到短包头中的自旋比特位 */
     struct dplpmtud_state       cop_dplpmtud;
 };
 
@@ -408,11 +409,13 @@ static const struct prio_iter_if ext_prio_iter_if = {
 struct ietf_full_conn
 {
     struct lsquic_conn          ifc_conn;
-    struct conn_cid_elem        ifc_cces[MAX_SCID];
+    struct conn_cid_elem        ifc_cces[MAX_SCID];             /* 本端的CID, 即SCID, 同一条连接可以使用多个CID
+                                                                 * struct lsquic_conn->cn_cces指向本数组
+                                                                 */
     struct lsquic_rechist       ifc_rechist[N_PNS];             /* 接收到的包号区间 */
     /* App PNS only, used to calculate was_missing: */
-    lsquic_packno_t             ifc_max_ackable_packno_in;
-    struct lsquic_send_ctl      ifc_send_ctl;
+    lsquic_packno_t             ifc_max_ackable_packno_in;      /* 接收到的ACK触发包的最大包号 */
+    struct lsquic_send_ctl      ifc_send_ctl;                   /* send_ctl发送相关控制 */
     struct lsquic_conn_public   ifc_pub;
     lsquic_alarmset_t           ifc_alset;
     struct lsquic_set64         ifc_closed_stream_ids[N_SITS];  /* 记录被关闭的流ID */
@@ -461,10 +464,15 @@ struct ietf_full_conn
                                                 struct ietf_full_conn *,
                                                 struct lsquic_packet_in *);
     /* Number ackable packets received since last ACK was sent: */
-    unsigned                    ifc_n_slack_akbl[N_PNS];
+    unsigned                    ifc_n_slack_akbl[N_PNS];    /* 发送ACK帧后收到ACK触发包的个数, 发送ACK帧后会清零 */
     unsigned                    ifc_n_slack_all;    /* App PNS only */
-    unsigned                    ifc_max_retx_since_last_ack;
-    lsquic_time_t               ifc_max_ack_delay;
+                                                            /* 发送ACK帧后PNS空间收到包的个数, 发送ACK帧后会清零 */
+    unsigned                    ifc_max_retx_since_last_ack;    /* 控制收到几个ACK触发包响应一个ACK,
+                                                                 * 默认为2(MAX_RETR_PACKETS_SINCE_LAST_ACK)
+                                                                 */
+    lsquic_time_t               ifc_max_ack_delay;          /* delay ack最大超时时间, 默认为25ms(ACK_TIMEOUT)
+                                                             * delay ack定时器时间为 min(srtt/4, 25ms)
+                                                             */
     uint64_t                    ifc_ecn_counts_in[N_PNS][4];
     lsquic_stream_id_t          ifc_max_req_id; /* 记录由对端发起的双向流最大流ID */
     struct hcso_writer          ifc_hcso;
@@ -1255,23 +1263,32 @@ maybe_enable_spin (struct ietf_full_conn *conn, struct conn_path *cpath)
 {
     uint8_t nyb;
 
+    /* [RFC9000 17.4]:
+     * 终端必须在每16条网络路径中随机地选择至少一条, 或每16个连接ID中
+     * 选择一个禁用自旋比特位,
+     * 这是为了确保在网络上能经常观察到禁用自旋比特位的QUIC连接
+     */
     if (conn->ifc_settings->es_spin
-                    && lsquic_crand_get_nybble(conn->ifc_enpub->enp_crand))
+                    && lsquic_crand_get_nybble(conn->ifc_enpub->enp_crand)) /* 4bit的随机值: 1/16的概率为0 */
     {
         cpath->cop_flags |= COP_SPIN_BIT;
         cpath->cop_spin_bit = 0;
         LSQ_DEBUG("spin bit enabled on path %hhu", cpath->cop_path.np_path_id);
     }
-    else
+    else /* 关闭自旋比特位 */
     {
+       /* [RFC9000 17.4]:
+        * 当自旋比特位被禁用时, 终端可以将自旋比特位设置为任意值, 且必须忽略任何传入值.
+        * 推荐终端将自旋比特位设置为随机值, 要么为每个数据包独立选择, 要么为每个连接ID独立选择.
+        */
         /* " It is RECOMMENDED that endpoints set the spin bit to a random
          * " value either chosen independently for each packet or chosen
          * " independently for each connection ID.
          * (ibid.)
          */
-        cpath->cop_flags &= ~COP_SPIN_BIT;
+        cpath->cop_flags &= ~COP_SPIN_BIT; /* 禁用自旋位 */
         nyb = lsquic_crand_get_nybble(conn->ifc_enpub->enp_crand);
-        cpath->cop_spin_bit = nyb & 1;
+        cpath->cop_spin_bit = nyb & 1; /* 使用随机值 */
         LSQ_DEBUG("spin bit disabled %s on path %hhu; random spin bit "
             "value is %hhu",
             !conn->ifc_settings->es_spin ? "via settings" : "randomly",
@@ -1550,6 +1567,7 @@ lsquic_ietf_full_conn_server_new (struct lsquic_engine_public *enpub,
     if (!conn)
         goto err0;
     now = lsquic_time_now();
+    /* 从mini连接逐个拷贝scid */
     conn->ifc_conn.cn_cces = conn->ifc_cces;
     conn->ifc_conn.cn_n_cces = sizeof(conn->ifc_cces)
                                                 / sizeof(conn->ifc_cces[0]);
@@ -1922,6 +1940,7 @@ generate_ack_frame_for_pns (struct ietf_full_conn *conn,
     else
         ecn_counts = NULL;
 
+    /* iquic调用ietf_v1_gen_ack_frame() */
     w = conn->ifc_conn.cn_pf->pf_gen_ack_frame(
             packet_out->po_data + packet_out->po_data_sz,
             lsquic_packet_out_avail(packet_out),
@@ -2006,7 +2025,7 @@ generate_ack_frame (struct ietf_full_conn *conn, lsquic_time_t now)
 
     count = 0;
     for (pns = 0; pns < N_PNS; ++pns)
-        if (conn->ifc_flags & (IFC_ACK_QUED_INIT << pns))
+        if (conn->ifc_flags & (IFC_ACK_QUED_INIT << pns)) /* 需要发送ACK帧 */
         {
             packet_out = lsquic_send_ctl_new_packet_out(&conn->ifc_send_ctl,
                                                         0, pns, CUR_NPATH(conn));
@@ -4866,6 +4885,7 @@ ietf_full_conn_ci_next_packet_to_send (struct lsquic_conn *lconn,
                                                                     to_coal);
     if (packet_out)
     {
+        /* 设置自旋比特位 */
         cpath = NPATH2CPATH(packet_out->po_path);
         lsquic_packet_out_set_spin_bit(packet_out, cpath->cop_spin_bit);
     }
@@ -5529,6 +5549,7 @@ conn_is_receive_only_stream (const struct ietf_full_conn *conn,
 }
 
 
+/* 处理接收RESET_STREAM帧 */
 static unsigned
 process_rst_stream_frame (struct ietf_full_conn *conn,
         struct lsquic_packet_in *packet_in, const unsigned char *p, size_t len)
@@ -5562,7 +5583,7 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
                   * 这会导致该流的发送部分开启然后立即转到'重置发送'状态)
                   */
     {
-        if (conn_is_stream_closed(conn, stream_id))
+        if (conn_is_stream_closed(conn, stream_id)) /* 该流已经被关闭了, 不用处理 */
         {
             LSQ_DEBUG("got reset frame for closed stream %"PRIu64, stream_id);
             return parsed_len;
@@ -5583,7 +5604,8 @@ process_rst_stream_frame (struct ietf_full_conn *conn,
         ++call_on_new;
     }
 
-    if (0 != lsquic_stream_rst_in(stream, offset, error_code)) /* 处理接收重置帧 */
+    /* 处理接收重置帧 */
+    if (0 != lsquic_stream_rst_in(stream, offset, error_code))
     {
         ABORT_ERROR("received invalid RST_STREAM");
         return 0;
@@ -5983,6 +6005,7 @@ process_stream_frame (struct ietf_full_conn *conn,
 }
 
 
+/* 接收处理ACK帧 */
 static unsigned
 process_ack_frame (struct ietf_full_conn *conn,
     struct lsquic_packet_in *packet_in, const unsigned char *p, size_t len)
@@ -6063,7 +6086,7 @@ process_ack_frame (struct ietf_full_conn *conn,
         }
         conn->ifc_saved_ack_received = packet_in->pi_received; /* 接收时间为最新的ACK */
     }
-    else
+    else /* 非APP空间直接处理ack */
     {
         if (0 != process_ack(conn, new_acki, packet_in->pi_received,
                                                 packet_in->pi_received))
@@ -6085,6 +6108,10 @@ process_ack_frame (struct ietf_full_conn *conn,
 }
 
 
+/* 处理PING帧
+ * 实际上本函数没做什么工作, 因为在处理完帧后process_regular_packet()中
+ * 会设置需要回复ACK帧(PING帧属于ACK触发帧)
+ */
 static unsigned
 process_ping_frame (struct ietf_full_conn *conn,
         struct lsquic_packet_in *packet_in, const unsigned char *p, size_t len)
@@ -6099,7 +6126,7 @@ process_ping_frame (struct ietf_full_conn *conn,
                                             conn->ifc_pub.last_tick);
     conn->ifc_pub.last_prog = conn->ifc_pub.last_tick;
 
-    return 1;
+    return 1; /* PING帧只有1字节 */
 }
 
 
@@ -6926,7 +6953,7 @@ process_packet_frame (struct ietf_full_conn *conn,
 
     /* 得到包加密等级(根据包类型对应) */
     enc_level = lsquic_packet_in_enc_level(packet_in);
-    /* 从获取帧类型, iquic调用ietf_v1_parse_frame_type() */
+    /* 获取帧类型, iquic调用ietf_v1_parse_frame_type() */
     type = conn->ifc_conn.cn_pf->pf_parse_frame_type(p, len);
     /* 根据quic各种版本和等级(包类型)来确定是否处理该类型的帧 */
     if (lsquic_legal_frames_by_level[conn->ifc_conn.cn_version][enc_level]
@@ -7161,7 +7188,8 @@ try_queueing_ack_app (struct ietf_full_conn *conn,
 {
     lsquic_time_t srtt, ack_timeout;
 
-    if (conn->ifc_n_slack_akbl[PNS_APP] >= conn->ifc_max_retx_since_last_ack
+    /* 这里判断是否发送ACK帧 */
+    if (conn->ifc_n_slack_akbl[PNS_APP] >= conn->ifc_max_retx_since_last_ack /* 收到2个ACK触发包回复一个ACK */
 /* From [draft-ietf-quic-transport-29] Section 13.2.1:
  " Similarly, packets marked with the ECN Congestion Experienced (CE)
  " codepoint in the IP header SHOULD be acknowledged immediately, to
@@ -7169,26 +7197,27 @@ try_queueing_ack_app (struct ietf_full_conn *conn,
  */
             || (ecn == ECN_CE
                     && lsquic_send_ctl_ecn_turned_on(&conn->ifc_send_ctl))
-            || (was_missing == WM_MAX_GAP)
+            || (was_missing == WM_MAX_GAP) /* 新的洞的包号比之前的大, 说明包丢失 */
             || ((conn->ifc_flags & IFC_ACK_HAD_MISS)
                     && was_missing == WM_SMALLER
-                    && conn->ifc_n_slack_akbl[PNS_APP] > 0)
+                    && conn->ifc_n_slack_akbl[PNS_APP] > 0) /* ACK丢了?并且收到洞的包 */
             || many_in_and_will_write(conn))
     {
         lsquic_alarmset_unset(&conn->ifc_alset, AL_ACK_APP);
         lsquic_send_ctl_sanity_check(&conn->ifc_send_ctl);
-        conn->ifc_flags |= IFC_ACK_QUED_APP;
+        conn->ifc_flags |= IFC_ACK_QUED_APP; /* 设置需要发送ACK帧 */
         LSQ_DEBUG("%s ACK queued: ackable: %u; all: %u; had_miss: %d; "
             "was_missing: %d",
             lsquic_pns2str[PNS_APP], conn->ifc_n_slack_akbl[PNS_APP],
             conn->ifc_n_slack_all,
             !!(conn->ifc_flags & IFC_ACK_HAD_MISS), (int) was_missing);
     }
-    else if (conn->ifc_n_slack_akbl[PNS_APP] > 0)
+    else if (conn->ifc_n_slack_akbl[PNS_APP] > 0) /* 收到1个ACK触发包, 设置delay ACK超时定时器 */
     {
         if (!lsquic_alarmset_is_set(&conn->ifc_alset, AL_ACK_APP))
         {
             /* See https://github.com/quicwg/base-drafts/issues/3304 for more */
+            /* delay ack定时器超时时间为 min(srtt/4, 25ms) */
             srtt = lsquic_rtt_stats_get_srtt(&conn->ifc_pub.rtt_stats);
             if (srtt)
                 ack_timeout = MAX(1000, MIN(conn->ifc_max_ack_delay, srtt / 4));
@@ -7213,7 +7242,7 @@ try_queueing_ack_init_or_hsk (struct ietf_full_conn *conn,
 {
     if (conn->ifc_n_slack_akbl[pns] > 0)
     {
-        conn->ifc_flags |= IFC_ACK_QUED_INIT << pns;
+        conn->ifc_flags |= IFC_ACK_QUED_INIT << pns; /* 设置需要发送ACK */
         LSQ_DEBUG("%s ACK queued: ackable: %u",
             lsquic_pns2str[pns], conn->ifc_n_slack_akbl[pns]);
     }
@@ -7486,7 +7515,7 @@ holes_after (struct lsquic_rechist *rechist, lsquic_packno_t packno)
 {
     const struct lsquic_packno_range *first_range;
 
-    first_range = lsquic_rechist_peek(rechist);
+    first_range = lsquic_rechist_peek(rechist); /* 接收的最大包号区间 */
     /* If it's not in the very first range, there is obviously a gap
      * between it and the maximum packet number.  If the packet number
      * in question preceeds the cutoff, we assume that there are no
@@ -7618,15 +7647,18 @@ process_regular_packet (struct ietf_full_conn *conn,
         }
     }
 
+    /* 包中DCID与当前使用的CID不一致, 说明CID改变了 */
     is_dcid_changed = !LSQUIC_CIDS_EQ(CN_SCID(&conn->ifc_conn),
                                         &packet_in->pi_dcid);
     if (pns == PNS_INIT)
+        /* iquic调用iquic_esfi_set_iscid()保存initial包中的初始SCID */
         conn->ifc_conn.cn_esf.i->esfi_set_iscid(conn->ifc_conn.cn_enc_session,
                                                                     packet_in);
     else
     {
         if (is_dcid_changed)
         {
+            /* 包的DCID与iniial一致{cn_cces[0]为initial包中的DCID(无CCE_SEQNO)} */
             if (LSQUIC_CIDS_EQ(&conn->ifc_conn.cn_cces[0].cce_cid,
                             &packet_in->pi_dcid)
                 && !(conn->ifc_conn.cn_cces[0].cce_flags & CCE_SEQNO))
@@ -7641,6 +7673,7 @@ process_regular_packet (struct ietf_full_conn *conn,
             /* 服务端在收到第一个Handshake包后停止发送和处理Initial包 */
             if ((conn->ifc_flags & (IFC_SERVER | IFC_IGNORE_INIT)) == IFC_SERVER)
                 ignore_init(conn);  /* 忽略和停止发送initial包, 并清除INIT包空间 */
+            /* 计算"粗糙的"rtt, 大概是 发送initial到接收第一个handshark包的时间 */
             lsquic_send_ctl_maybe_calc_rough_rtt(&conn->ifc_send_ctl, pns - 1);
         }
     }
@@ -7656,7 +7689,10 @@ process_regular_packet (struct ietf_full_conn *conn,
         if (!(conn->ifc_flags & (IFC_SERVER|IFC_DCID_SET)))
             record_dcid(conn, packet_in);
         saved_path_id = conn->ifc_cur_path_id;
-        parse_regular_packet(conn, packet_in); /* 处理包中的帧 */
+        /*
+         * 这里处理包中的帧
+         */
+        parse_regular_packet(conn, packet_in);
         if (saved_path_id == conn->ifc_cur_path_id)
         {
             if (conn->ifc_cur_path_id != packet_in->pi_path_id)
@@ -7694,21 +7730,30 @@ process_regular_packet (struct ietf_full_conn *conn,
  "    missing packets between that packet and this packet.
         *
         */
-        if (packet_in->pi_frame_types & IQUIC_FRAME_ACKABLE_MASK)
+        /* 接下来这里判断是否需要回复ACK, 以上注释的意思:
+         *
+         * " 为了帮助发送端进行丢失检测, 终端在接收到ACK触发包时, 应该立即生成并发送ACK帧:
+         * " - 当数据包的包号小于已接收到的ACK触发包包号时, 或
+         * " - 当数据包的包号大于已接收到的ACK触发包包号, 并且之间存在丢失的数据包时
+         *
+         * INIT/HASH空间收到包则直接发送ACK: try_queueing_ack_init_or_hsk()
+         * APP空间则使用was_missing来判断是否丢包: try_queueing_ack_app()
+         */
+        if (packet_in->pi_frame_types & IQUIC_FRAME_ACKABLE_MASK) /* 是ACK触发包 */
         {
             if (PNS_APP == pns /* was_missing is only used in PNS_APP */)
             {
-                if (packet_in->pi_packno > conn->ifc_max_ackable_packno_in)
+                if (packet_in->pi_packno > conn->ifc_max_ackable_packno_in) /* 比上次收到的包号大 */
                 {
                     was_missing = (enum was_missing)    /* WM_MAX_GAP is 1 */
                         !is_rechist_empty /* Don't count very first packno */
                         && conn->ifc_max_ackable_packno_in + 1
-                                                    < packet_in->pi_packno
+                                                    < packet_in->pi_packno /* 有洞说明包丢了 */
                         && holes_after(&conn->ifc_rechist[PNS_APP],
                             conn->ifc_max_ackable_packno_in);
                     conn->ifc_max_ackable_packno_in = packet_in->pi_packno;
                 }
-                else
+                else /* 比上次收到的包号小(WM_SMALLER), 对端如果有BUG可能相等则为WM_NONE */
                     was_missing = (enum was_missing)    /* WM_SMALLER is 2 */
                     /* The check is necessary (rather setting was_missing to
                      * WM_SMALLER) because we cannot guarantee that peer does
@@ -7717,28 +7762,37 @@ process_regular_packet (struct ietf_full_conn *conn,
                         ((packet_in->pi_packno
                                     < conn->ifc_max_ackable_packno_in) << 1);
             }
-            else
+            else /* 非APP空间不用管 */
                 was_missing = WM_NONE;
             ++conn->ifc_n_slack_akbl[pns];
         }
-        else
+        else /* 非ACK触发包也不用管 */
             was_missing = WM_NONE;
         conn->ifc_n_slack_all += PNS_APP == pns;
+        /* 还未设置发送ACK标志, 这里来设置是否需要发送ACK帧 */
         if (0 == (conn->ifc_flags & (IFC_ACK_QUED_INIT << pns)))
         {
             if (PNS_APP == pns)
+                /* APP空间判断是否需要回复ACK帧以及设置delay ack定时器 */
                 try_queueing_ack_app(conn, was_missing,
                     lsquic_packet_in_ecn(packet_in), packet_in->pi_received);
-            else
+            else /* INIT/HSK空间收到包则直接发送ACK */
                 try_queueing_ack_init_or_hsk(conn, pns);
         }
         conn->ifc_incoming_ecn <<= 1;
         conn->ifc_incoming_ecn |=
                             lsquic_packet_in_ecn(packet_in) != ECN_NOT_ECT;
         ++conn->ifc_ecn_counts_in[pns][ lsquic_packet_in_ecn(packet_in) ];
+        /* 这里设置自旋比特位
+         * [RFC9000 17.4]:
+         * - 当服务器在某条网络路径上接收到一个1-RTT数据包且它增大了服务器所记录的客户端看到的最大数据包号,
+         * 服务器就将那条路径上的自旋值设置为接收到的那个数据包中的自旋值
+         * - 当客户端在某条网络路径上接收到一个1-RTT数据包且它增大了客户端所记录的服务器看到的最大数据包号,
+         * 客户端就将那条路径上的自旋值设置为接收到的那个数据包中的自旋值的相反值
+         */
         if (PNS_APP == pns
                 && (cpath = &conn->ifc_paths[packet_in->pi_path_id],
-                                            cpath->cop_flags & COP_SPIN_BIT)
+                                            cpath->cop_flags & COP_SPIN_BIT) /* 该路径启用了自旋比特位 */
                 /* [draft-ietf-quic-transport-30] Section 17.3.1 talks about
                  * how spin bit value is set.
                  */
@@ -7752,9 +7806,9 @@ process_regular_packet (struct ietf_full_conn *conn,
         {
             cpath->cop_max_packno = packet_in->pi_packno;
             if (conn->ifc_flags & IFC_SERVER)
-                cpath->cop_spin_bit = lsquic_packet_in_spin_bit(packet_in);
+                cpath->cop_spin_bit = lsquic_packet_in_spin_bit(packet_in); /* 服务端取值 */
             else
-                cpath->cop_spin_bit = !lsquic_packet_in_spin_bit(packet_in);
+                cpath->cop_spin_bit = !lsquic_packet_in_spin_bit(packet_in); /* 客户端取反 */
         }
         conn->ifc_pub.bytes_in += packet_in->pi_data_sz;
         if ((conn->ifc_mflags & MF_VALIDATE_PATH) &&

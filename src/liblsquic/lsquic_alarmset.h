@@ -28,7 +28,7 @@ enum alarm_id {
     AL_PING,
     AL_MTU_PROBE,
     AL_IDLE,
-    AL_ACK_APP,
+    AL_ACK_APP,                             /* ACK帧的超时定时器 */
     AL_RET_CIDS,
     AL_CID_THROT,
     AL_PATH_CHAL,

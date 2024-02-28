@@ -66,7 +66,8 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
                                                     * 等到包号解码后才包含包号(iquic_esf_decrypt_packet()中)
                                                     * 特例: retry/版本协商包包含了整个UDP报文(这两种包没有包号字段)
                                                     */
-    unsigned short                  pi_data_sz;    /* Data plus header *//* quic包大小 */
+    unsigned short                  pi_data_sz;    /* Data plus header */
+                                                   /* quic包大小, 包括包头和数据 */
     /* A packet may be referred to by one or more frames and packets_in
      * list.
      */
@@ -90,10 +91,10 @@ typedef struct lsquic_packet_in /* 表示收到的包(一个UDP报文可能有多个lsquic_pack
         PI_GQUIC        = (1 << 7),                /* 表示gquic的数据包, 不设置即iquic */
         PI_UNUSED_8     = (1 << 8),                /* <-- hole, reuse me! */
 #define PIBIT_ECN_SHIFT 9
-        PI_ECN_BIT_0    = (1 << 9),
-        PI_ECN_BIT_1    = (1 <<10),
+        PI_ECN_BIT_0    = (1 << 9),                 /* 这两位为收到包的ECN标志(TOS字段的第6,7两位), 即ECT(6)和CE(7)位 */
+        PI_ECN_BIT_1    = (1 <<10),                 /* ECT和CE位分别组成4种组合: 00(Not-ECT) 01(ECT1) 10(ECT0) 11(CE) */
 #define PIBIT_SPIN_SHIFT 11
-        PI_SPIN_BIT     = (1 <<11),                 /* 短包头中设置了自旋比特位 */
+        PI_SPIN_BIT     = (1 <<11),                 /* 短包头中设置了自旋比特位(为1) */
 #define PIBIT_BITS_SHIFT 12
         PI_BITS_BIT_0   = (1 <<12),                 /* 首字节的最低两位 */
         PI_BITS_BIT_1   = (1 <<13),                 /* 这两位在短包头中表示包号长度 */

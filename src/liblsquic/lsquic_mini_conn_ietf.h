@@ -38,10 +38,11 @@ typedef uint64_t packno_set_t;
 struct ietf_mini_conn
 {
     struct lsquic_conn              imc_conn;
-    struct conn_cid_elem            imc_cces[3]; /* [0]为初始包的dcid(客户端发送的首个初始数据包的
+    struct conn_cid_elem            imc_cces[3]; /* 本端的CID, 即SCID
+                                                  * [0]为初始包的dcid(客户端发送的首个初始数据包的
                                                   * 目标连接ID字段用于确定初始数据包的包保护密钥,
                                                   * 并非服务端的cid)
-                                                  * [1]为服务端生成的cid(scid), 生成scid函数为lsquic_generate_scid()
+                                                  * [1]为服务端最早生成的cid(scid), 生成scid函数为lsquic_generate_scid()
                                                   */
     struct lsquic_engine_public    *imc_enpub;
     lsquic_time_t                   imc_expire; /* 握手超时时间, 默认LSQUIC_DF_HANDSHAKE_TO */

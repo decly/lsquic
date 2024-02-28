@@ -52,7 +52,7 @@ static const struct conn_iface evanescent_conn_iface;
 
 struct packet_req
 {
-    struct lsquic_hash_elem     pr_hash_el;
+    struct lsquic_hash_elem     pr_hash_el; /* 用来链入struct pr_queue哈希表 */
     lsquic_cid_t                pr_scid;
     lsquic_cid_t                pr_dcid;
     enum packet_req_type        pr_type;
@@ -99,7 +99,7 @@ struct pr_queue
     struct malo                *prq_reqs_pool;
     const struct lsquic_engine_public
                                *prq_enpub;
-    struct lsquic_hash         *prq_reqs_hash;
+    struct lsquic_hash         *prq_reqs_hash;  /* 哈希表, 保存struct packet_req */
     unsigned                    prq_max_reqs;
     unsigned                    prq_nreqs;
     unsigned                    prq_max_conns;

@@ -278,9 +278,9 @@ struct lsquic_stream /* 流结构, 表示一条流 */
     /* From the network, we get frames, which we keep on a list ordered
      * by offset.
      */
-    struct data_in                 *data_in;        /* 用来保存STREAM帧数据
-                                                       指向nocopy_data_in->ncdi_data_in
-                                                         - 未使用SCF_USE_DI_HASH时
+    struct data_in                 *data_in;        /* 用来保存STREAM帧数据(即用户数据)
+                                                     * 指向nocopy_data_in->ncdi_data_in
+                                                     *   - 未使用SCF_USE_DI_HASH时
                                                      * 指向hash_data_in->hdi_data_in
                                                      *   - 使用SCF_USE_DI_HASH时 
                                                      *   - 当帧数据存在重叠时也会从nocopy data切换到hash data(详见lsquic_stream_frame_in)

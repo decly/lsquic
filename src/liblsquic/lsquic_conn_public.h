@@ -65,6 +65,7 @@ struct lsquic_conn_public {
      * limit before initial path is validated.
      */
     unsigned                        bytes_in;   /* successfully processed */
+                                                /* 接收的合法包的总大小, 包括包头和数据长度 */
     unsigned                        bytes_out;
     /* Used for no-progress timeout */
     lsquic_time_t                   last_tick, last_prog;

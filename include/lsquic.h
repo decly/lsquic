@@ -700,7 +700,7 @@ struct lsquic_engine_settings {
      * Clock granularity information is used by the pacer.  The value
      * is in microseconds; default is @ref LSQUIC_DF_CLOCK_GRANULARITY.
      */
-    unsigned        es_clock_granularity;
+    unsigned        es_clock_granularity; /* pacer的时间粒度, 默认1ms */
 
     /**
      * Congestion control algorithm to use.
@@ -923,6 +923,7 @@ struct lsquic_engine_settings {
      *
      * Default value is @ref LSQUIC_DF_SPIN
      */
+    /* 是否使用自旋比特位, 默认开启(LSQUIC_DF_SPIN) */
     int             es_spin;
 
     /**

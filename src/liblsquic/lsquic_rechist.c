@@ -528,6 +528,7 @@ lsquic_rechist_mem_used (const struct lsquic_rechist *rechist)
 }
 
 
+/* 返回接收的最大包号区间 */
 const struct lsquic_packno_range *
 lsquic_rechist_peek (struct lsquic_rechist *rechist)
 {

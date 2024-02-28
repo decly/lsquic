@@ -8,6 +8,7 @@
 #define OFF_MASK(crand_) ((sizeof((crand_)->rand_buf) * 2) - 1)
 
 
+/* 返回值一个4比特的随机数，范围从0到15 */
 uint8_t
 lsquic_crand_get_nybble (struct crand *crand)
 {

@@ -63,7 +63,8 @@ struct lsquic_engine_public {
         ENPUB_PROC  = (1 << 0), /* Being processed by one of the user-facing
                                  * functions.
                                  */
-        ENPUB_CAN_SEND = (1 << 1),
+                                /* 表示engine正在处理中(lsquic_engine_process_conns()) */
+        ENPUB_CAN_SEND = (1 << 1), /* 表示可以发包, 当发送失败了会清除该标志(比如sendmsg失败) */
         ENPUB_HTTP  = (1 << 2), /* Engine in HTTP mode */
     }                               enp_flags;
     unsigned char                   enp_ver_tags_buf[ sizeof(lsquic_ver_tag_t) * N_LSQVER ];

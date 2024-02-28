@@ -319,6 +319,7 @@ struct conn_cid_elem
         CCE_SEQNO       = 1 << 1,       /* cce_seqno is set (CIDs in Initial
                                          * packets have no sequence number).
                                          */
+                                        /* 客户端的initial包的初始SCID不设置该标志 */
         CCE_REG         = 1 << 2,       /* CID has been registered */
                                         /* 表示该cid被注册了(连接被加入连接表conns_hash) */
         CCE_PORT        = 1 << 3,       /* It's not a CID element at all:
@@ -360,15 +361,19 @@ struct lsquic_conn
     lsquic_time_t                cn_last_sent;
     lsquic_time_t                cn_last_ticked;	/* 被conns_tickable处理的时间 */
     struct conn_cid_elem        *cn_cces;           /* At least one is available */
-                                                    /* mini连接指向struct ietf_mini_conn->imc_cces
-                                                     * full连接指向struct ietf_full_conn->ifc_cces
+                                                    /* 本端的CID, 即SCID, 是个数组(同一条连接可以使用多个CID)
+                                                     * - mini连接指向struct ietf_mini_conn->imc_cces
+                                                     * - full连接指向struct ietf_full_conn->ifc_cces
+                                                     * 当前使用的SCID由索引cn_cur_cce_idx确定, 可通过宏CN_SCID获取
                                                      */
     lsquic_conn_ctx_t           *cn_conn_ctx;
     enum lsquic_conn_flags       cn_flags;
     enum lsquic_version          cn_version:8;      /* quic版本 */
     unsigned char                cn_cces_mask;  /* Those that are set */
+                                                    /* cn_cces的位掩码, 按位表示cn_cces数组中有效的CID */
     unsigned char                cn_n_cces; /* Number of CCEs in cn_cces */
-    unsigned char                cn_cur_cce_idx;
+                                                    /* cn_cces数组的长度, mini连接为3, full连接为8 */
+    unsigned char                cn_cur_cce_idx;    /* 当前使用的SCID索引, 即cn_cces数组中的索引 */
 #if LSQUIC_TEST
     struct conn_cid_elem         cn_cces_buf[8];
 #define LSCONN_INITIALIZER_CID(lsconn_, cid_) { \

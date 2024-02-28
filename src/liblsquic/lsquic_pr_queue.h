@@ -49,7 +49,7 @@ struct pr_queue;
 struct sockaddr;
 
 enum packet_req_type {
-    PACKET_REQ_VERNEG,
+    PACKET_REQ_VERNEG,  /* 版本协商包 */
     PACKET_REQ_PUBRES,
     PACKET_REQ_RETRY,
     N_PREQ_TYPES,

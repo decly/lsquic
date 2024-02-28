@@ -8,7 +8,10 @@
  *  I   Applicable to IETF QUIC only
  *  B   Applicable to both GQUIC and IETF QUIC.
  */
-/* 所有帧类型, 对应的类型值为lsquic_iquic_byte2type数组(iquic) */
+/* 所有帧类型
+ * iquic对应的类型值为lsquic_iquic_byte2type数组(iquic)
+ * 对应帧的处理函数集合为process_frames
+ */
 enum quic_frame_type
 {
     QUIC_FRAME_INVALID,             /* 非法类型 */
@@ -21,7 +24,7 @@ enum quic_frame_type
     QUIC_FRAME_WINDOW_UPDATE,       /* G */
     QUIC_FRAME_BLOCKED,             /* B */
     QUIC_FRAME_STOP_WAITING,        /* G */
-    QUIC_FRAME_PING,                /* B */
+    QUIC_FRAME_PING,                /* B *//* PING帧, 终端可以使用PING帧来验证对端是否仍然存在或检查对端的可达性 */
     QUIC_FRAME_MAX_DATA,            /* I *//* 最大数据量帧, 用于流量控制，告知对端可以在整个连接上发送的最大数据量 */
     QUIC_FRAME_MAX_STREAM_DATA,     /* I *//* 最大流数据量帧, 用于流量控制中通知对端一条流上可以发送的最大数据量
                                             * 应用消费完数据，缓冲区可用之后可发送MAX_STREAM_DATA帧以允许对端发送更多数据
@@ -223,6 +226,7 @@ extern const char *const lsquic_pns2str[];
     |  QUIC_FTBIT_TIMESTAMP          \
     |  QUIC_FTBIT_CRYPTO             )
 
+/* ACK触发帧, 这几种帧不需要回复ACK: ACK, PADDING, CONNECTION_CLOSE, TIMESTAMP */
 /* [draft-ietf-quic-transport-24] Section 1.2 */
 #define IQUIC_FRAME_ACKABLE_MASK (  \
     (ALL_IQUIC_FRAMES | QUIC_FTBIT_DATAGRAM) \

@@ -1223,10 +1223,12 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
 {
     struct lsquic_conn *lconn;
 
+    /* 如果已经收到了FIN, 但是RESET_STREAM帧携带的Final Size与FIN中的offset不一样则错误 */
     if ((stream->sm_bflags & SMBF_IETF)
             && (stream->stream_flags & STREAM_FIN_RECVD)
             && stream->sm_fin_off != offset)
     {
+        /* 调用ietf_full_conn_ci_abort_error()报告下错误 */
         lconn = stream->conn_pub->lconn;
         lconn->cn_if->ci_abort_error(lconn, 0, TEC_FINAL_SIZE_ERROR,
             "final size %"PRIu64" from RESET_STREAM frame (id: %"PRIu64") "
@@ -1235,6 +1237,7 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
         return -1;
     }
 
+    /* 已经收到过RESET_STREAM帧, 忽略 */
     if (stream->stream_flags & STREAM_RST_RECVD)
     {
         LSQ_DEBUG("ignore duplicate RST_STREAM frame");
@@ -1247,6 +1250,7 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
      */
     stream->stream_flags |= STREAM_RST_RECVD;
 
+    /* RESET_STREAM帧中携带的Final Size小于已经收到过的数据偏移, 出错 */
     if (lsquic_sfcw_get_max_recv_off(&stream->fc) > offset)
     {
         LSQ_INFO("RST_STREAM invalid: its offset %"PRIu64" is "
@@ -1256,6 +1260,7 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
         return -1;
     }
 
+    /* RESET_STREAM帧中携带的Final Size超出了流控, 错误 */
     if (!lsquic_sfcw_set_max_recv_off(&stream->fc, offset))
     {
         LSQ_INFO("RST_STREAM invalid: its offset %"PRIu64
@@ -1263,6 +1268,7 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
         return -1;
     }
 
+    /* 调用上层提供的on_reset回调 */
     if (stream->stream_if->on_reset
                             && !(stream->stream_flags & STREAM_ONCLOSE_DONE))
     {
@@ -1286,9 +1292,12 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
     }
 
     /* Let user collect error: */
+    /* 将流的连接加入tickable中 */
     maybe_conn_to_tickable_if_readable(stream);
 
+    /* 设置(假定)上层读取了所有数据, 因为数据已经不要了 */
     lsquic_sfcw_consume_rem(&stream->fc);
+    /* 将缓存的接收的所有数据直接清除 */
     drop_frames_in(stream);
 
     if (!(stream->sm_bflags & SMBF_IETF))
@@ -1311,7 +1320,7 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
 
     stream->stream_flags |= STREAM_RST_RECVD;
 
-    maybe_finish_stream(stream);
+    maybe_finish_stream(stream); /* 看是否需要关闭流 */
     maybe_schedule_call_on_close(stream);
 
     return 0;

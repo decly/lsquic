@@ -99,7 +99,7 @@ struct packets_in
     WSABUF                  *vecs;
 #endif
 #if ECN_SUPPORTED
-    int                     *ecn;
+    int                     *ecn;   /* ecn, 即IP首部TOS字段的第6(ECT)和第7(CE)bit */
 #endif
     struct sockaddr_storage *local_addresses,
                             *peer_addresses;
@@ -458,7 +458,7 @@ proc_ancillary (
                                             && cmsg->cmsg_type == IPV6_TCLASS))
         {
             memcpy(ecn, CMSG_DATA(cmsg), sizeof(*ecn));
-            *ecn &= IPTOS_ECN_MASK;
+            *ecn &= IPTOS_ECN_MASK; /* ECN在IP首部TOS的后两位 */
         }
 #ifdef __FreeBSD__
         else if (cmsg->cmsg_level == IPPROTO_IP
@@ -764,7 +764,7 @@ read_handler (evutil_socket_t fd, short flags, void *ctx)
                         (struct sockaddr *) &packs_in->peer_addresses[n],
                         sport,
 #if ECN_SUPPORTED
-                        packs_in->ecn[n]
+                        packs_in->ecn[n] /* IP首部中携带的ECN */
 #else
                         0
 #endif
