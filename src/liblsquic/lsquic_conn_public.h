@@ -25,7 +25,8 @@ struct network_path;
 
 struct lsquic_conn_public {
     struct lsquic_streams_tailq     sending_streams,    /* Send RST_STREAM, BLOCKED, and WUF frames */
-                                    read_streams,
+                                                        /* 当流需要发送SMQF_SENDING_FLAGS中类型的帧时会被加入该队列 */
+                                    read_streams,       /* 上层想读取流数据的流, 由stream_wantread()加入 */
                                     write_streams,      /* Send STREAM frames */
                                     service_streams;
     struct lsquic_hash             *all_streams;    /* 保存所有流的哈希表,
@@ -68,7 +69,10 @@ struct lsquic_conn_public {
                                                 /* 接收的合法包的总大小, 包括包头和数据长度 */
     unsigned                        bytes_out;
     /* Used for no-progress timeout */
-    lsquic_time_t                   last_tick, last_prog;
+    lsquic_time_t                   last_tick, last_prog;   /* 这两个用于连接空闲超时断开
+                                                             * last_tick为连接最后进入ci_tick的时间
+                                                             * last_prog为连接最后被读写的时间
+                                                             */
     unsigned                        max_peer_ack_usec;
     uint8_t                         n_special_streams;
 };

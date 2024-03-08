@@ -64,23 +64,32 @@ cfcw_maybe_increase_max_window (struct lsquic_cfcw *fc)
 }
 
 
+/* 连接流控(接收)窗口的调整 */
 int
 lsquic_cfcw_fc_offsets_changed (struct lsquic_cfcw *fc)
 {
     lsquic_time_t now, since_last_update, srtt;
 
+    /* 这里控制在上层读取 接收窗口的一半 后再调整接收窗口和接收的偏移边界
+     * 因为 这里cf_recv_off不变, 而cf_read_off随上层读取数据而增加,
+     * 所以 cf_recv_off - cf_read_off 越来越小, 直到小于接收窗口的一半(cf_max_recv_win/2)
+     * 才进行下面的扩大接收窗口
+     */
     if (fc->cf_recv_off - fc->cf_read_off >= fc->cf_max_recv_win / 2)
-        return 0;
+        return 0; /* 不调整接收窗口 */
 
     now = lsquic_time_now();
     since_last_update = now - fc->cf_last_updated;
     fc->cf_last_updated = now;
 
     srtt = lsquic_rtt_stats_get_srtt(&fc->cf_conn_pub->rtt_stats);
+    /* 这里尝试扩大接收窗口: 只有在2个rtt时间内读取接收窗口一半以上的数据 才会扩大窗口
+     * 每次增加扩大一倍: new = old * 2
+     */
     if (since_last_update < srtt * 2)
-        cfcw_maybe_increase_max_window(fc);
+        cfcw_maybe_increase_max_window(fc); /* cf_max_recv_win扩大为两倍 */
 
-    fc->cf_recv_off = fc->cf_read_off + fc->cf_max_recv_win;
+    fc->cf_recv_off = fc->cf_read_off + fc->cf_max_recv_win; /* 更新连接流控 */
     LSQ_DEBUG("recv_off changed: read_off: %"PRIu64"; recv_off: %"
         PRIu64"", fc->cf_read_off, fc->cf_recv_off);
     return 1;

@@ -75,7 +75,7 @@ frec_arr_pofi_first (struct packet_out_frec_iter *pofi,
     pofi->packet_out = packet_out;
     pofi->cur_frec_arr = TAILQ_FIRST(&packet_out->po_frecs.arr);
     pofi->frec_idx = 0;
-    return frec_arr_pofi_next(pofi);
+    return frec_arr_pofi_next(pofi); /* 返回指向帧, 并指向下一个 */
 }
 
 
@@ -115,6 +115,7 @@ lsquic_pofi_next (struct packet_out_frec_iter *pofi)
  * Assumption: frames are added to the packet_out in order of their placement
  * in packet_out->po_data.  There is no assertion to guard for for this.
  */
+/* 将帧信息保存到包(packet_out->po_frecs)中 */
 int
 lsquic_packet_out_add_frame (lsquic_packet_out_t *packet_out,
                               struct lsquic_mm *mm,
@@ -128,6 +129,7 @@ lsquic_packet_out_add_frame (lsquic_packet_out_t *packet_out,
 
     if (!(packet_out->po_flags & PO_FREC_ARR))
     {
+        /* 包中还没有帧, 写入到one直接返回即可 */
         if (!frec_taken(&packet_out->po_frecs.one))
         {
             packet_out->po_frecs.one.fe_frame_type  = frame_type;
@@ -140,24 +142,24 @@ lsquic_packet_out_add_frame (lsquic_packet_out_t *packet_out,
         if (!frec_arr)
             return -1;
         memset(frec_arr, 0, sizeof(*frec_arr));
-        frec_arr->frecs[0] = packet_out->po_frecs.one;
+        frec_arr->frecs[0] = packet_out->po_frecs.one; /* 把原来one先保存在第一个 */
         TAILQ_INIT(&packet_out->po_frecs.arr);
         TAILQ_INSERT_TAIL(&packet_out->po_frecs.arr, frec_arr,
-                           next_stream_rec_arr);
-        packet_out->po_flags |= PO_FREC_ARR;
+                           next_stream_rec_arr); /* 将申请的frec_arr链入packet中 */
+        packet_out->po_flags |= PO_FREC_ARR; /* 表示使用了帧arr数组 */
         i = 1;
-        goto set_elem;
+        goto set_elem; /* 去设置新的帧 */
     }
 
     /* New records go at the very end: */
     frec_arr = TAILQ_LAST(&packet_out->po_frecs.arr, frame_rec_arr_tailq);
     last_taken = -1;
     for (i = 0; i < sizeof(frec_arr->frecs) / sizeof(frec_arr->frecs[0]); ++i)
-        if (frec_taken(&frec_arr->frecs[i]))
+        if (frec_taken(&frec_arr->frecs[i])) /* 已经被使用 */
             last_taken = i;
 
     i = last_taken + 1;
-    if (i < sizeof(frec_arr->frecs) / sizeof(frec_arr->frecs[0]))
+    if (i < sizeof(frec_arr->frecs) / sizeof(frec_arr->frecs[0])) /* 还有未使用的帧, 直接设置 */
     {
   set_elem:
         frec_arr->frecs[i].fe_frame_type  = frame_type;
@@ -167,6 +169,7 @@ lsquic_packet_out_add_frame (lsquic_packet_out_t *packet_out,
         return 0;                   /* Insert in existing frec */
     }
 
+    /* 都用完了, 再申请一个frame_rec_arr */
     frec_arr = lsquic_malo_get(mm->malo.frame_rec_arr);
     if (!frec_arr)
         return -1;
@@ -300,26 +303,31 @@ lsquic_packet_out_destroy (lsquic_packet_out_t *packet_out,
 /* If `stream_id' is UINT64_MAX, stream frames from all reset streams are elided.
  * Otherwise, elision is limited to the specified stream.
  */
+/* 遍历包中的所有流帧, 删除被写重置的流(接收STOP_SENDING帧或发送RESET_STREAM帧)的流帧
+ * @stream_id 若为 UINT64_MAX 表示针对所有流, 否则只针对指定的流id
+ */
 unsigned
 lsquic_packet_out_elide_reset_stream_frames (lsquic_packet_out_t *packet_out,
                                              lsquic_stream_id_t stream_id)
 {
     struct packet_out_frec_iter pofi;
     struct frame_rec *frec;
-    unsigned short adj = 0;
-    int n_stream_frames = 0, n_elided = 0;
+    unsigned short adj = 0; /* 表示删除帧的总长度 */
+    int n_stream_frames = 0, n_elided = 0; /* 表示删除帧的个数 */
     int victim;
 
+    /* 遍历包中的帧记录, 若该流 */
     for (frec = lsquic_pofi_first(&pofi, packet_out); frec;
                                             frec = lsquic_pofi_next(&pofi))
     {
         /* Offsets of all frame records should be adjusted */
-        frec->fe_off -= adj;
+        frec->fe_off -= adj; /* 流帧被删除, 后续的帧都得调整偏移 */
 
         if (frec->fe_frame_type == QUIC_FRAME_STREAM)
         {
             ++n_stream_frames;
 
+            /* 指定stream_id参数则只删除该流的流帧 */
             if (stream_id != UINT64_MAX)
             {
                 victim = frec->fe_stream->id == stream_id;
@@ -328,28 +336,29 @@ lsquic_packet_out_elide_reset_stream_frames (lsquic_packet_out_t *packet_out,
                     assert(lsquic_stream_is_write_reset(frec->fe_stream));
                 }
             }
-            else
+            else /* 不指定stream_id则删除所有被写重置的流(接收STOP_SENDING帧或发送RESET_STREAM帧)的流帧 */
                 victim = lsquic_stream_is_write_reset(frec->fe_stream);
 
-            if (victim)
+            if (victim) /* 需要删除该帧 */
             {
                 ++n_elided;
 
                 /* Move the data and adjust sizes */
                 adj += frec->fe_len;
+                /* 将后面帧移动直接覆盖本帧, 即删除本帧 */
                 memmove(packet_out->po_data + frec->fe_off,
                         packet_out->po_data + frec->fe_off + frec->fe_len,
                         packet_out->po_data_sz - frec->fe_off - frec->fe_len);
                 packet_out->po_data_sz -= frec->fe_len;
 
                 lsquic_stream_acked(frec->fe_stream, frec->fe_frame_type);
-                frec->fe_frame_type = 0;
+                frec->fe_frame_type = 0; /* 置0表示被删除 */
             }
         }
     }
 
     assert(n_stream_frames);
-    if (n_elided == n_stream_frames)
+    if (n_elided == n_stream_frames) /* 所有流帧都被删除了 */
     {
         packet_out->po_frame_types &= ~(1 << QUIC_FRAME_STREAM);
         packet_out->po_flags &= ~PO_STREAM_END;
@@ -359,6 +368,7 @@ lsquic_packet_out_elide_reset_stream_frames (lsquic_packet_out_t *packet_out,
 }
 
 
+/* 遍历包中所有帧, 删除不可重传帧 */
 void
 lsquic_packet_out_chop_regen (lsquic_packet_out_t *packet_out)
 {

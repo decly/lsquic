@@ -23,11 +23,13 @@ typedef struct lsquic_sfcw { /* stream流控窗口, Stream Flow Control Window */
     uint64_t            sf_read_off;        /* Number of bytes consumed */
                                             /* 已经被上层读取的数据偏移 */
     lsquic_time_t       sf_last_updated;    /* Last time window was updated */
-                                            /* 上一次更新接收窗口的时间 */
+                                            /* 上一次更新sf_recv_off的时间 */
     struct lsquic_conn_public
                        *sf_conn_pub;
     unsigned            sf_max_recv_win;    /* Maximum receive window */
-                                            /* 流控窗口的大小, 即sf_recv_off - sf_read_off */
+                                            /* 流控窗口的大小, sf_recv_off = sf_read_off + sf_max_recv_win
+                                             * 流接收窗口的调整详见lsquic_sfcw_fc_offsets_changed()
+                                             * */
     lsquic_stream_id_t  sf_stream_id;       /* Used for logging */
 } lsquic_sfcw_t;
 

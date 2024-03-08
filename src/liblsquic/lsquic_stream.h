@@ -140,7 +140,7 @@ struct stream_filter_if
 enum stream_q_flags
 {
     /* read_streams: */
-    SMQF_WANT_READ    = 1 << 0,
+    SMQF_WANT_READ    = 1 << 0,     /* 上层想读取流数据的流, 该流同时也被加入read_streams队列中 */
 
     /* write_streams: */
 #define SMQF_WRITE_Q_FLAGS (SMQF_WANT_FLUSH|SMQF_WANT_WRITE)

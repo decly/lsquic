@@ -43,26 +43,26 @@ struct bwp_state;
  * ACK-deleting code in send controller (see po_regen_sz) is the same for
  * both QUIC versions.
  */
-struct frame_rec {
+struct frame_rec { /* 帧记录, 表示packet_out中的一个帧 */
     union {
         struct lsquic_stream   *stream;
         uintptr_t               data;
     }                        fe_u;
 #define fe_stream fe_u.stream
-    unsigned short           fe_off,
-                             fe_len;
-    enum quic_frame_type     fe_frame_type;
+    unsigned short           fe_off,        /* 帧在packet_out->po_data中的偏移 */
+                             fe_len;        /* 帧的长度 */
+    enum quic_frame_type     fe_frame_type; /* 帧类型, 为0表示该帧未被使用或被删除, 此时其他变量为无效 */
 };
 
 #define frec_taken(frec) ((frec)->fe_frame_type)
 
-struct frame_rec_arr {
-    TAILQ_ENTRY(frame_rec_arr)     next_stream_rec_arr;
+struct frame_rec_arr { /* 用来辅助保存帧(struct frame_rec)到packet_out->po_frecs.arr中 */
+    TAILQ_ENTRY(frame_rec_arr)     next_stream_rec_arr; /* 链表元素 */
     struct frame_rec               frecs[
       ( 64                              /* Efficient size for malo allocator */
       - sizeof(TAILQ_ENTRY(frame_rec))  /* next_stream_rec_arr */
-      ) / sizeof(struct frame_rec)
-    ];
+      ) / sizeof(struct frame_rec)      /* 这一串结果为3个, 即frecs[3] */
+    ];  /* 帧数组 */
 };
 
 TAILQ_HEAD(frame_rec_arr_tailq, frame_rec_arr);
@@ -90,6 +90,7 @@ typedef struct lsquic_packet_out
                                          */
 
     enum quic_ft_bit   po_frame_types;  /* Bitmask of QUIC_FRAME_* */
+                                        /* 包中包含的帧类型 */
     enum packet_out_flags {
             /* TODO XXX Phase out PO_MINI in favor of a more specialized flag:
              * we only need an indicator that a packet contains STREAM frames
@@ -100,7 +101,7 @@ typedef struct lsquic_packet_out
         PO_HELLO    = (1 << 1),         /* Packet contains SHLO or CHLO data */
         PO_SENT     = (1 << 2),         /* Packet has been sent (mini only) */
         PO_ENCRYPTED= (1 << 3),         /* po_enc_data has encrypted data */
-        PO_FREC_ARR = (1 << 4),
+        PO_FREC_ARR = (1 << 4),         /* 表示packet_out保存的帧使用了po_frecs.arr数组 */
 #define POBIT_SHIFT 5
         PO_BITS_0   = (1 << 5),         /* PO_BITS_0 and PO_BITS_1 encode the */
         PO_BITS_1   = (1 << 6),         /*   packet number length.  See macros below. */
@@ -111,7 +112,7 @@ typedef struct lsquic_packet_out
         PO_REPACKNO = (1 <<10),         /* Regenerate packet number *//* 表示需要重新设置包号 */
         PO_NOENCRYPT= (1 <<11),         /* Do not encrypt data in po_data */
         PO_VERNEG   = (1 <<12),         /* Version negotiation packet. */
-        PO_STREAM_END
+        PO_STREAM_END                   /* 标志包写满了没有空间了 */
                     = (1 <<13),         /* STREAM frame reaches the end of the packet: no
                                          * further writes are allowed.
                                          */
@@ -146,6 +147,7 @@ typedef struct lsquic_packet_out
         PO_SPIN_BIT = (1 <<30),         /* Value of the spin bit *//* 自旋比特位的值 */
     }                  po_flags;
     unsigned short     po_data_sz;      /* Number of usable bytes in data */
+                                        /* 包中数据的大小(所有帧, 不包括包首部), 即当前po_data长度 */
     unsigned short     po_enc_data_sz;  /* Number of usable bytes in data */
     unsigned short     po_sent_sz;      /* If PO_SENT_SZ is set, real size of sent buffer. */
                                         /* 如果PO_SENT_SZ置位, 那么该值为包大小
@@ -161,6 +163,7 @@ typedef struct lsquic_packet_out
                                          * not to be retransmitted, e.g. ACK
                                          * frames.
                                          */
+                                        /* 包中无需重传的字节数, 比如ACK帧 */
     unsigned short     po_n_alloc;      /* Total number of bytes allocated in po_data */
     unsigned short     po_token_len;    /* 要发送token的大小(token保存在po_token中) */
     enum header_type   po_header_type:8;
@@ -185,15 +188,21 @@ typedef struct lsquic_packet_out
                                         /* 表示被sc_next_limit限制时发送, 比如RTO触发时会设置只能发送两个包 */
         POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK标记丢失 */
     }                  po_lflags:16;
-    unsigned char     *po_data;
+    unsigned char     *po_data;         /* 包的数据实体 */
 
     /* A lot of packets contain only one frame.  Thus, `one' is used first.
      * If this is not enough, any number of frame_rec_arr structures can be
      * allocated to handle more frame records.
      */
+    /* 包中所有的帧记录
+     * - 如果帧不超过一个则使用one直接保存
+     * - 超过一个则使用arr链表来保存(同时设置PO_FREC_ARR标志),
+     *   每个frame_rec_arr可保存3个帧, 不够了再申请加入arr链表
+     * 详见lsquic_packet_out_add_frame()
+     */
     union {
         struct frame_rec               one;
-        struct frame_rec_arr_tailq     arr;
+        struct frame_rec_arr_tailq     arr; /* 按照链表保存帧(PO_FREC_ARR标志被设置) */
     }                  po_frecs;
 
     /* If PO_ENCRYPTED is set, this points to the buffer that holds encrypted
@@ -253,6 +262,7 @@ typedef struct lsquic_packet_out
     lconn->cn_pf->pf_packout_max_header_size(lconn, po_flags, dcid_len,     \
                                              header_type))                  \
 
+/* iquic调用ietf_v1_packout_size()  */
 #define lsquic_packet_out_total_sz(lconn, p) (\
     (lconn)->cn_pf->pf_packout_size(lconn, p))
 
@@ -311,7 +321,7 @@ typedef struct lsquic_packet_out
 
 #define lsquic_packet_out_ecn(p)  (((p)->po_lflags >> POECN_SHIFT) & 3)
 
-struct packet_out_frec_iter {
+struct packet_out_frec_iter { /* 用来辅助遍历packet_out->po_frecs.arr帧链表的结构 */
     lsquic_packet_out_t         *packet_out;
     struct frame_rec_arr        *cur_frec_arr;
     unsigned                     frec_idx;

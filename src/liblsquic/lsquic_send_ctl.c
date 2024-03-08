@@ -73,7 +73,7 @@
 
 #define CGP(ctl) ((struct cong_ctl *) (ctl)->sc_cong_ctl)
 
-/* 包的实际长度 */
+/* 包的实际长度, 包括包首部和所有数据 */
 #define packet_out_total_sz(p) \
                 lsquic_packet_out_total_sz(ctl->sc_conn_pub->lconn, p)
 /* 包长度, 与packet_out_total_sz区别是丢包记录会返回原包的长度 */
@@ -637,7 +637,7 @@ send_ctl_sched_Xpend_common (struct lsquic_send_ctl *ctl,
 }
 
 
-/* 将packet_out包加到sc_scheduled_packets队列中 */
+/* 将packet_out包加到sc_scheduled_packets队列尾部 */
 static void
 send_ctl_sched_append (struct lsquic_send_ctl *ctl,
                        struct lsquic_packet_out *packet_out)
@@ -1619,8 +1619,10 @@ send_ctl_next_lost (lsquic_send_ctl_t *ctl)
         {
             if (0 == (lost_packet->po_flags & PO_MINI))
             {
+                /* 删除其中已经被写重置的流(对端不再接收流数据)的流帧 */
                 lsquic_packet_out_elide_reset_stream_frames(lost_packet,
                                                                     UINT64_MAX);
+                /* 包中的帧都是不可重传帧, 直接删除即可 */
                 if (lost_packet->po_regen_sz >= lost_packet->po_data_sz)
                 {
                     LSQ_DEBUG("Dropping packet #%"PRIu64" from lost queue",
@@ -1645,6 +1647,7 @@ send_ctl_next_lost (lsquic_send_ctl_t *ctl)
         if (!lsquic_send_ctl_can_send(ctl))
             return NULL;
 
+        /* 包大小 小于mss可以直接发送 */
         if (packet_out_total_sz(lost_packet) <= SC_PACK_SIZE(ctl))
         {
   pop_lost_packet:
@@ -1653,7 +1656,7 @@ send_ctl_next_lost (lsquic_send_ctl_t *ctl)
             lost_packet->po_flags &= ~PO_LOST;
             lost_packet->po_flags |= PO_RETX;
         }
-        else
+        else /* 超过mss需要分割 */
         {
             /* We delay resizing lost packets as long as possible, hoping that
              * it may be ACKed.  At this point, however, we have to resize.
@@ -1678,7 +1681,7 @@ send_ctl_next_packno (lsquic_send_ctl_t *ctl)
 {
     lsquic_packno_t packno;
 
-    packno = ++ctl->sc_cur_packno;
+    packno = ++ctl->sc_cur_packno; /* 包号+1 */
     if (packno == ctl->sc_gap)
         packno = ++ctl->sc_cur_packno;
 
@@ -1773,6 +1776,7 @@ send_ctl_all_bytes_out (const struct lsquic_send_ctl *ctl)
 }
 
 
+/* 返回1说明被pacing阻塞了无法发送 */
 int
 lsquic_send_ctl_pacer_blocked (struct lsquic_send_ctl *ctl)
 {
@@ -1856,6 +1860,7 @@ send_ctl_can_send_pre_hsk (struct lsquic_send_ctl *ctl)
 __attribute__((weak))
 #endif
 #endif
+/* 判断当前cwnd和pacing是否可发送 */
 int
 lsquic_send_ctl_can_send (struct lsquic_send_ctl *ctl)
 {
@@ -2032,7 +2037,7 @@ lsquic_send_ctl_scheduled_one (lsquic_send_ctl_t *ctl,
         lsquic_pacer_packet_scheduled(&ctl->sc_pacer, n_out,
             send_ctl_in_recovery(ctl), send_ctl_transfer_time, ctl);
     }
-    send_ctl_sched_append(ctl, packet_out); /* 加到sc_scheduled_packets队列中 */
+    send_ctl_sched_append(ctl, packet_out); /* 加到sc_scheduled_packets队列尾部 */
 }
 
 
@@ -2415,6 +2420,7 @@ lsquic_send_ctl_new_packet_out (lsquic_send_ctl_t *ctl, unsigned need_at_least,
 }
 
 
+/* 找到schedule队列中相同包空间和网络路径的最后一个包 */
 struct lsquic_packet_out *
 lsquic_send_ctl_last_scheduled (struct lsquic_send_ctl *ctl,
                     enum packnum_space pns, const struct network_path *path,
@@ -2426,6 +2432,7 @@ lsquic_send_ctl_last_scheduled (struct lsquic_send_ctl *ctl,
     {
         TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_scheduled_packets,
                                                 lsquic_packets_tailq, po_next)
+            /* 包空间和网络路径一样 */
             if (pns == lsquic_packet_out_pns(packet_out)
                                                 && path == packet_out->po_path)
                 return packet_out;
@@ -2435,7 +2442,7 @@ lsquic_send_ctl_last_scheduled (struct lsquic_send_ctl *ctl,
         TAILQ_FOREACH_REVERSE(packet_out, &ctl->sc_scheduled_packets,
                                                 lsquic_packets_tailq, po_next)
             if (pns == lsquic_packet_out_pns(packet_out)
-                    && packet_out->po_regen_sz == packet_out->po_data_sz
+                    && packet_out->po_regen_sz == packet_out->po_data_sz /* 包中的帧都是不可重传 */
                                                 && path == packet_out->po_path)
                 return packet_out;
     }
@@ -2545,14 +2552,14 @@ update_for_resending (lsquic_send_ctl_t *ctl, lsquic_packet_out_t *packet_out)
     {
         if (packet_out->po_flags & PO_SCHED)
             ctl->sc_bytes_scheduled -= packet_out->po_regen_sz;
-        lsquic_packet_out_chop_regen(packet_out);
+        lsquic_packet_out_chop_regen(packet_out); /* 删除包中不可重传帧 */
     }
     EV_LOG_CONN_EVENT(LSQUIC_LOG_CONN_ID, "schedule resend, repackage packet "
                       "#%"PRIu64" -> #%"PRIu64, oldno, packno);
 }
 
 
-/* 重传丢失的包 */
+/* 重传丢失的包(sc_lost_packets队列) */
 unsigned
 lsquic_send_ctl_reschedule_packets (lsquic_send_ctl_t *ctl)
 {
@@ -2752,13 +2759,13 @@ lsquic_send_ctl_squeeze_sched (lsquic_send_ctl_t *ctl)
                                                             packet_out = next)
     {
         next = TAILQ_NEXT(packet_out, po_next);
-        if (packet_out->po_regen_sz < packet_out->po_data_sz
+        if (packet_out->po_regen_sz < packet_out->po_data_sz /* 说明包中不止包括无需重传的数据(ACK帧), 还有数据 */
                 || packet_out->po_frame_types == QUIC_FTBIT_PATH_CHALLENGE)
         {
             if (packet_out->po_flags & PO_ENCRYPTED)
                 send_ctl_return_enc_data(ctl, packet_out);
         }
-        else
+        else /* 包中都是无需重传的, 直接丢弃 */
         {
 #ifndef NDEBUG
             /* Log the whole list before we squeeze for the first time */
@@ -2775,6 +2782,7 @@ lsquic_send_ctl_squeeze_sched (lsquic_send_ctl_t *ctl)
         }
     }
 
+    /* 包被删除了需要重置包号 */
     if (dropped)
         lsquic_send_ctl_reset_packnos(ctl);
 
@@ -2786,7 +2794,7 @@ lsquic_send_ctl_squeeze_sched (lsquic_send_ctl_t *ctl)
         LOG_PACKET_Q(&ctl->sc_scheduled_packets, "delayed packets");
 #endif
 
-    return ctl->sc_n_scheduled > 0;
+    return ctl->sc_n_scheduled > 0; /* schedule队列还有包 */
 }
 
 
@@ -2801,6 +2809,7 @@ lsquic_send_ctl_reset_packnos (lsquic_send_ctl_t *ctl)
 }
 
 
+/* 将schedule队列尾部的n_acks个包(为ACK帧)移到队列首部 */
 void
 lsquic_send_ctl_ack_to_front (struct lsquic_send_ctl *ctl, unsigned n_acks)
 {

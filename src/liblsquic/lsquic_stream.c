@@ -294,6 +294,7 @@ maybe_conn_to_tickable (lsquic_stream_t *stream)
 static void
 maybe_conn_to_tickable_if_readable (lsquic_stream_t *stream)
 {
+    /* 如果流中有数据可读, 则加入tickable中 */
     if (!stream_inside_callback(stream) && lsquic_stream_readable(stream))
     {
         lsquic_engine_add_conn_to_tickable(stream->conn_pub->enpub,
@@ -1154,7 +1155,10 @@ lsquic_stream_frame_in (lsquic_stream_t *stream, stream_frame_t *frame)
             goto end_ok;
         if (got_next_offset)
             /* Checking the offset saves di_get_frame() call */
-            /* 检查有帧数据可被接收, 将连接加入conns_tickable队列中 */
+            /* 检查有帧数据可被接收, 将连接加入conns_tickable队列中,
+             * 在tick中会回调上层的读取接口来获取数据:
+             * ietf_full_conn_ci_tick() -> process_streams_read_events()
+             */
             maybe_conn_to_tickable_if_readable(stream);
         rv = 0;
   end_ok:
@@ -1725,7 +1729,7 @@ lsquic_stream_readf (struct lsquic_stream *stream,
 
     nread = stream_readf(stream, readf, ctx);
     if (nread >= 0)
-        maybe_update_last_progress(stream);
+        maybe_update_last_progress(stream); /* 读完数据更新last_prog */
 
     return nread;
 }
@@ -2046,6 +2050,7 @@ lsquic_stream_read_offset (const lsquic_stream_t *stream)
 }
 
 
+/* 设置上层是否需要读取流中的数据 */
 static int
 stream_wantread (lsquic_stream_t *stream, int is_want)
 {
@@ -2053,14 +2058,14 @@ stream_wantread (lsquic_stream_t *stream, int is_want)
     const int new_val = !!is_want;
     if (old_val != new_val)
     {
-        if (new_val)
+        if (new_val) /* 设置了is_want将流加入read_streams中并设置SMQF_WANT_READ */
         {
             if (!old_val)
                 TAILQ_INSERT_TAIL(&stream->conn_pub->read_streams, stream,
                                                             next_read_stream);
             stream->sm_qflags |= SMQF_WANT_READ;
         }
-        else
+        else /* 否则相反 */
         {
             stream->sm_qflags &= ~SMQF_WANT_READ;
             if (old_val)
@@ -2118,6 +2123,7 @@ stream_wantwrite (struct lsquic_stream *stream, int new_val)
 }
 
 
+/* 该接口用来给上层设置是否需要读取流中的数据(is_want参数为1则需要) */
 int
 lsquic_stream_wantread (lsquic_stream_t *stream, int is_want)
 {

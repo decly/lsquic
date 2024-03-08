@@ -736,6 +736,7 @@ struct lsquic_engine_settings {
      * Default value is @ref LSQUIC_DF_NOPROGRESS_TIMEOUT_SERVER in server
      * mode and @ref LSQUIC_DF_NOPROGRESS_TIMEOUT_CLIENT in client mode.
      */
+    /* 连接空闲(即被读写)超时断开时间, 服务端默认60秒, 客户端为0表示不断开 */
     unsigned        es_noprogress_timeout;
 
     /* The following settings are specific to IETF QUIC. */

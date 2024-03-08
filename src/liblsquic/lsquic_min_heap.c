@@ -70,6 +70,7 @@ lsquic_mh_insert (struct min_heap *heap, void *item, uint64_t val)
 }
 
 
+/* 获取首个并删除 */
 void *
 lsquic_mh_pop (struct min_heap *heap)
 {

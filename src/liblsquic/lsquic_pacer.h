@@ -22,7 +22,7 @@ struct pacer
     unsigned        pa_n_scheduled;     /* Within single tick */
                                         /* 一个tick内设置调度的次数 */
     enum {
-        PA_LAST_SCHED_DELAYED   = (1 << 0),
+        PA_LAST_SCHED_DELAYED   = (1 << 0), /* 表示当前受到pacing限制无法发送 */
         PA_DELAYED_ON_TICK_IN   = (1 << 1),
     }               pa_flags;
 #ifndef NDEBUG

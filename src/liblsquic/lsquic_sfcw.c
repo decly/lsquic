@@ -90,13 +90,14 @@ sfcw_maybe_increase_max_window (struct lsquic_sfcw *fc)
 }
 
 
+/* 流流控(接收)窗口的调整 */
 int
 lsquic_sfcw_fc_offsets_changed (struct lsquic_sfcw *fc)
 {
     lsquic_time_t since_last_update, srtt, now;
 
     /* 这里控制在上层读取 接收窗口的一半 后再调整接收窗口和接收的偏移边界
-     * 因为 这里sf_recv_off不变, 而sf_read_off随便上层读取数据而增加,
+     * 因为 这里sf_recv_off不变, 而sf_read_off随上层读取数据而增加,
      * 所以 sf_recv_off - sf_read_off 越来越小, 直到小于接收窗口的一半(sf_max_recv_win/2)
      * 才进行下面的扩大接收窗口
      */

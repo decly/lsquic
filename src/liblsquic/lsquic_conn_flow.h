@@ -14,12 +14,16 @@ typedef struct lsquic_cfcw { /* 连接级别的流控, 控制所有流之和 */
     uint64_t      cf_max_recv_off;  /* Largest offset observed (cumulative) */
                                     /* 记录接收到的最大数据偏移(所有流累加) */
     uint64_t      cf_recv_off;      /* Flow control receive offset */
-                                    /* 连接流控的大小偏移
+                                    /* 连接流控的大小偏移, 控制连接可接收的边界offset
                                      * 所有流的偏移相加(cf_max_recv_off)超过它则认为超出连接流控
                                      */
     uint64_t      cf_read_off;      /* Number of bytes consumed (cumulative) */
-    lsquic_time_t cf_last_updated;
+                                    /* 已经被上层读取的数据偏移 */
+    lsquic_time_t cf_last_updated;  /* 上一次更新cf_recv_off的时间 */
     unsigned      cf_max_recv_win;  /* Maximum receive window */
+                                    /* 当前接收窗口大小, cf_recv_off = cf_read_off + cf_max_recv_win
+                                     * 连接接收窗口的调整详见lsquic_cfcw_fc_offsets_changed()
+                                     */
 } lsquic_cfcw_t;
 
 struct lsquic_conn_cap {

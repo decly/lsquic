@@ -48,7 +48,7 @@ enum lsquic_conn_flags {
     LSCONN_VER_SET        = (1 <<10),   /* cn_version is set */
     LSCONN_EVANESCENT     = (1 <<11),   /* evanescent connection */
     LSCONN_TICKABLE       = (1 <<12),   /* Connection is in the Tickable Queue */
-                                        /* 连接被加入了conns_tickable队列 */
+                                        /* 连接被加入了conns_tickable队列, 即需要马上被处理 */
     LSCONN_COI_ACTIVE     = (1 <<13),
     LSCONN_COI_INACTIVE   = (1 <<14),
     LSCONN_SEND_BLOCKED   = (1 <<15),   /* Send connection blocked frame */
@@ -359,7 +359,7 @@ struct lsquic_conn
     struct attq_elem            *cn_attq_elem;
     lsquic_cid_t                 cn_logid;
     lsquic_time_t                cn_last_sent;
-    lsquic_time_t                cn_last_ticked;	/* 被conns_tickable处理的时间 */
+    lsquic_time_t                cn_last_ticked;	/* 连接最后一次被conns_tickable处理的时间 */
     struct conn_cid_elem        *cn_cces;           /* At least one is available */
                                                     /* 本端的CID, 即SCID, 是个数组(同一条连接可以使用多个CID)
                                                      * - mini连接指向struct ietf_mini_conn->imc_cces
@@ -455,6 +455,7 @@ struct conn_stats {
                                                 /* 丢失后又被确认的包个数(虚假重传) */
         unsigned long       lost_packets;
         unsigned long       retx_packets;       /* Number of retransmitted packets */
+                                                /* 重传丢包的个数 */
         unsigned long       bytes;              /* Overall bytes out */
         unsigned long       headers_uncomp;     /* Sum of uncompressed header bytes */
         unsigned long       headers_comp;       /* Sum of compressed header bytes */

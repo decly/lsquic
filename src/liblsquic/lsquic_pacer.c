@@ -106,6 +106,7 @@ lsquic_pacer_loss_event (struct pacer *pacer)
 }
 
 
+/* 返回当前pacing是否可发送 */
 int
 lsquic_pacer_can_schedule (struct pacer *pacer, unsigned n_in_flight)
 {

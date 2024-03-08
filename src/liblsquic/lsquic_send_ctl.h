@@ -39,6 +39,7 @@ enum send_ctl_flags {
     SC_WAS_QUIET    = (1 << 6),
     SC_IETF         = (1 << 7),
 #define SCBIT_LOST_ACK_SHIFT 8
+    /* 以下3个表示ACK丢失了, 对应各包空间 */
     SC_LOST_ACK_INIT=  1 << 8,
     SC_LOST_ACK_HSK = SC_LOST_ACK_INIT << PNS_HSK,
     SC_LOST_ACK_APP = SC_LOST_ACK_INIT << PNS_APP,
@@ -103,7 +104,7 @@ typedef struct lsquic_send_ctl {
     struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1];
     const struct ver_neg           *sc_ver_neg;
     struct lsquic_conn_public      *sc_conn_pub;
-    struct pacer                    sc_pacer;
+    struct pacer                    sc_pacer;               /* pacing控制 */
     lsquic_packno_t                 sc_cur_packno;          /* 当前使用的最大包号 */
     lsquic_packno_t                 sc_largest_sent_at_cutback;	/* 丢包开始时的发送包号, 类似high_seq */
     lsquic_packno_t                 sc_max_rtt_packno;      /* rtt更新的包号 */

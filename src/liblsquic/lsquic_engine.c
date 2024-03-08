@@ -270,7 +270,10 @@ struct lsquic_engine
 #endif
     unsigned                           n_conns;             /* 当前连接个数(包括mini) */
     lsquic_time_t                      deadline;
-    lsquic_time_t                      resume_sending_at;
+    lsquic_time_t                      resume_sending_at;   /* 可继续发送的时间
+                                                             * 当发送失败后会设置1秒后才能继续发送,
+                                                             * 并且去掉ENPUB_CAN_SEND标志
+                                                             */
     lsquic_time_t                      mem_logged_last;
     unsigned                           mini_conns_count;    /* 当前mini连接的个数 */
     struct lsquic_purga               *purga;
@@ -2171,7 +2174,7 @@ conn_iter_next_tickable (struct lsquic_engine *engine)
         while (1)
         {
             conn = lsquic_mh_pop(&engine->conns_tickable); /* 从tickable删除 */
-            if (conn && (conn->cn_flags & LSCONN_SKIP_ON_PROC))
+            if (conn && (conn->cn_flags & LSCONN_SKIP_ON_PROC)) /* 这个标志没使用 */
                 (void) engine_decref_conn(engine, conn, LSCONN_TICKABLE);
             else
                 break;
@@ -2265,6 +2268,7 @@ drop_all_mini_conns (lsquic_engine_t *engine)
 }
 
 
+/* 处理连接的核心函数 */
 void
 lsquic_engine_process_conns (lsquic_engine_t *engine)
 {
@@ -2285,7 +2289,7 @@ lsquic_engine_process_conns (lsquic_engine_t *engine)
     /* 先从attq队列中取出到期的conn加入到conns_tickable中 */
     while ((conn = lsquic_attq_pop(engine->attq, now)))
     {
-        conn = engine_decref_conn(engine, conn, LSCONN_ATTQ);
+        conn = engine_decref_conn(engine, conn, LSCONN_ATTQ); /* 去除LSCONN_ATTQ标志 */
         if (conn && !(conn->cn_flags & LSCONN_TICKABLE))
         {
             lsquic_mh_insert(&engine->conns_tickable, conn, conn->cn_last_ticked);
@@ -2644,11 +2648,15 @@ send_batch (lsquic_engine_t *engine, const struct send_batch_ctx *sb_ctx,
             (*packet_out)->po_sent = now;
         while (++packet_out < end);
     }
+    /* 发送函数, 由上层指定, 比如http_server等使用的是sport_packets_out(),
+     * 最终还是调用sendmsg()/sendmmsg()
+     */
     n_sent = engine->packets_out(engine->packets_out_ctx, batch->outs + skip,
                                                             n_to_send - skip);
     e_val = errno;
     if (n_sent < (int) (n_to_send - skip) && e_val != EMSGSIZE)
     {
+        /* 发送失败会去掉ENPUB_CAN_SEND标志, 并设置1秒后才能继续发送 */
         engine->pub.enp_flags &= ~ENPUB_CAN_SEND;
         engine->resume_sending_at = now + 1000000;
         LSQ_DEBUG("cannot send packets");
@@ -3097,6 +3105,10 @@ process_connections (lsquic_engine_t *engine, conn_iter_f next_conn,
     reset_deadline(engine, now);
     STAILQ_INIT(&new_full_conns);
 
+    /* 在send_packets_out()->send_batch()发送时, 如果发送失败会去除ENPUB_CAN_SEND标志
+     * 表示不能发送, 同时设置resume_sending_at为1秒之后才能继续发送.
+     * 这里检查1秒时间到了可以继续发送了, 重新设置上ENPUB_CAN_SEND
+     */
     if (!(engine->pub.enp_flags & ENPUB_CAN_SEND)
                                         && now > engine->resume_sending_at)
     {
@@ -3108,14 +3120,17 @@ process_connections (lsquic_engine_t *engine, conn_iter_f next_conn,
 
     i = 0;
     /* 遍历所有被加入engine->conns_tickable的连接 以及 新连接 */
-    while ((conn = next_conn(engine))
+    while ((conn = next_conn(engine)) /* 即conn_iter_next_tickable() */
                             || (conn = next_new_full_conn(&new_full_conns)))
     {
-        tick_st = conn->cn_if->ci_tick(conn, now); /* full conn调用tick: ietf_full_conn_ci_tick */
+        tick_st = conn->cn_if->ci_tick(conn, now); /* full conn调用ietf_full_conn_ci_tick
+                                                    * mini conn调用ietf_mini_conn_ci_tick 
+                                                    * */
 #if LSQUIC_CONN_STATS
         if (conn == engine->busy.current)
             maybe_log_conn_stats(engine, conn, now);
 #endif
+        /* 这里设置连接最后被处理的时间戳, i用来微排序防止都是一样的时间 */
         conn->cn_last_ticked = now + i /* Maintain relative order */ ++;
         if (tick_st & TICK_PROMOTE) /* mini转为full conn的新连接 */
         {

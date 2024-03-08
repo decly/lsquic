@@ -73,7 +73,7 @@ struct lsquic_engine_public {
     struct evp_aead_ctx_st         *enp_retry_aead_ctx;
     unsigned char                  *enp_alpn;   /* May be set if not HTTP */
     /* es_noprogress_timeout converted to microseconds for speed */
-    lsquic_time_t                   enp_noprog_timeout;
+    lsquic_time_t                   enp_noprog_timeout; /* 连接空闲超时断开时间, 即es_noprogress_timeout转为微秒的值 */
     lsquic_time_t                   enp_mtu_probe_timer;
     /* Certs used by gQUIC server: */
     struct lsquic_hash             *enp_compressed_server_certs;

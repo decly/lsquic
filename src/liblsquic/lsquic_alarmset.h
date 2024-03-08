@@ -27,7 +27,7 @@ enum alarm_id {
     AL_RETX_APP = AL_RETX_INIT + PNS_APP,   /* 重传定时器, 回调函数retx_alarm_rings */
     AL_PING,
     AL_MTU_PROBE,
-    AL_IDLE,
+    AL_IDLE,                                /* 连接空闲(被读写)超时断开定时器, 回调函数为idle_alarm_expired() */
     AL_ACK_APP,                             /* ACK帧的超时定时器 */
     AL_RET_CIDS,
     AL_CID_THROT,

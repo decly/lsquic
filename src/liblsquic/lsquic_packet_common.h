@@ -22,7 +22,7 @@ enum quic_frame_type
     QUIC_FRAME_CONNECTION_CLOSE,    /* B */
     QUIC_FRAME_GOAWAY,              /* G */
     QUIC_FRAME_WINDOW_UPDATE,       /* G */
-    QUIC_FRAME_BLOCKED,             /* B */
+    QUIC_FRAME_BLOCKED,             /* B *//* 数据阻塞帧, 发送方应该在其希望发送数据却因连接级流量控制而无法发送时, 发送数据阻塞帧 */
     QUIC_FRAME_STOP_WAITING,        /* G */
     QUIC_FRAME_PING,                /* B *//* PING帧, 终端可以使用PING帧来验证对端是否仍然存在或检查对端的可达性 */
     QUIC_FRAME_MAX_DATA,            /* I *//* 最大数据量帧, 用于流量控制，告知对端可以在整个连接上发送的最大数据量 */
@@ -245,6 +245,7 @@ extern const char *const lsquic_pns2str[];
 
 extern const enum quic_ft_bit lsquic_legal_frames_by_level[][4];
 
+/* 不需重传帧的集合 */
 /* Applies both to gQUIC and IETF QUIC, thus "B" for "both" */
 #define BQUIC_FRAME_REGEN_MASK ((1 << QUIC_FRAME_ACK)                \
   | (1 << QUIC_FRAME_PATH_CHALLENGE) | (1 << QUIC_FRAME_PATH_RESPONSE) \

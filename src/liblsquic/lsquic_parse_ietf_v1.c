@@ -318,7 +318,7 @@ ietf_v1_packout_size (const struct lsquic_conn *lconn,
 {
     size_t sz;
 
-    /* 头部的大小 */
+    /* 包头部的大小 */
     if ((lconn->cn_flags & LSCONN_HANDSHAKE_DONE)
                                 && packet_out->po_header_type == HETY_SHORT)
         sz = ietf_v1_packout_header_size_short(packet_out->po_flags,
@@ -326,7 +326,7 @@ ietf_v1_packout_size (const struct lsquic_conn *lconn,
     else
         sz = ietf_v1_packout_header_size_long_by_packet(lconn, packet_out);
 
-    sz += packet_out->po_data_sz;
+    sz += packet_out->po_data_sz; /* 加上包中帧的大小 */
     sz += lconn->cn_esf_c->esf_tag_len;
 
     return sz;

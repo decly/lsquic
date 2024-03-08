@@ -115,7 +115,7 @@ enum ifull_conn_flags
     IFC_ACK_HAD_MISS  = 1 << 2,         /* ACK丢了? */
 #define IFC_BIT_ERROR 3
     IFC_ERROR         = 1 << IFC_BIT_ERROR,
-    IFC_TIMED_OUT     = 1 << 4,
+    IFC_TIMED_OUT     = 1 << 4, /* 表示连接空闲时间超时了 */
     IFC_ABORTED       = 1 << 5,
     IFC_HSK_FAILED    = 1 << 6,
     IFC_GOING_AWAY    = 1 << 7, /* 表示服务正在关闭, 不能创建新连接和新流 */
@@ -142,7 +142,7 @@ enum ifull_conn_flags
     IFC_RETRIED       = 1 << 21, /* 表示收到了retry包或者要丢弃后续的retry包 */
     IFC_SWITCH_DCID   = 1 << 22, /* Perform DCID switch when a new CID becomes available */
     IFC_GOAWAY_CLOSE  = 1 << 23,
-    IFC_FIRST_TICK    = 1 << 24,
+    IFC_FIRST_TICK    = 1 << 24, /* 本连接的第一个tick */
     IFC_IGNORE_HSK    = 1 << 25,
     IFC_PROC_CRYPTO   = 1 << 26,
     IFC_MIGRA         = 1 << 27,
@@ -156,7 +156,7 @@ enum ifull_conn_flags
 enum more_flags
 {
     MF_VALIDATE_PATH    = 1 << 0,
-    MF_NOPROG_TIMEOUT   = 1 << 1,
+    MF_NOPROG_TIMEOUT   = 1 << 1,   /* 表示设置了连接空闲断开时间(es_noprogress_timeout参数) */
     MF_CHECK_MTU_PROBE  = 1 << 2,
     MF_IGNORE_MISSING   = 1 << 3,
     MF_CONN_CLOSE_PACK  = 1 << 4,   /* CONNECTION_CLOSE has been packetized */
@@ -204,7 +204,7 @@ enum send
 
 enum send_flags
 {
-    SF_SEND_MAX_DATA                = 1 << SEND_MAX_DATA,
+    SF_SEND_MAX_DATA                = 1 << SEND_MAX_DATA,           /* 需要发送最大数据量帧 */
     SF_SEND_PING                    = 1 << SEND_PING,
     SF_SEND_PATH_CHAL               = 1 << SEND_PATH_CHAL,
     SF_SEND_PATH_CHAL_PATH_0        = 1 << SEND_PATH_CHAL_PATH_0,
@@ -417,7 +417,7 @@ struct ietf_full_conn
     lsquic_packno_t             ifc_max_ackable_packno_in;      /* 接收到的ACK触发包的最大包号 */
     struct lsquic_send_ctl      ifc_send_ctl;                   /* send_ctl发送相关控制 */
     struct lsquic_conn_public   ifc_pub;
-    lsquic_alarmset_t           ifc_alset;
+    lsquic_alarmset_t           ifc_alset;                      /* 各种定时器 */
     struct lsquic_set64         ifc_closed_stream_ids[N_SITS];  /* 记录被关闭的流ID */
     lsquic_stream_id_t          ifc_n_created_streams[N_SDS];   /* 本端创建流的个数(再加上最后两位的流类型即构成流ID)
                                                                  * 双向流和单向流的id是独立的
@@ -543,7 +543,9 @@ struct ietf_full_conn
     lsquic_time_t               ifc_idle_to;
     lsquic_time_t               ifc_ping_period;
     struct lsquic_hash         *ifc_bpus;
-    uint64_t                    ifc_last_max_data_off_sent;
+    uint64_t                    ifc_last_max_data_off_sent; /* 最后发送最大数据量帧(MAX_DATA)中携带的最大数据量
+                                                             * 即当时的cf_recv_off
+                                                             */
     unsigned short              ifc_min_dg_sz,
                                 ifc_max_dg_sz;
     struct packet_tolerance_stats
@@ -1786,6 +1788,7 @@ lsquic_ietf_full_conn_server_new (struct lsquic_engine_public *enpub,
 }
 
 
+/* 返回1表示需要回复ACK帧 */
 static int
 should_generate_ack (struct ietf_full_conn *conn,
                                             enum ifull_conn_flags ack_queued)
@@ -1795,6 +1798,7 @@ should_generate_ack (struct ietf_full_conn *conn,
     /* Need to set which ACKs are queued because generate_ack_frame() does not
      * generate ACKs unconditionally.
      */
+    /* 之前的ACK丢了, 需要回复ACK  */
     lost_acks = lsquic_send_ctl_lost_ack(&conn->ifc_send_ctl);
     if (lost_acks)
         conn->ifc_flags |= lost_acks << IFCBIT_ACK_QUED_SHIFT;
@@ -2015,6 +2019,7 @@ generate_ack_frame_for_pns (struct ietf_full_conn *conn,
 
 
 /* Return number of packets scheduled or 0 on error */
+/* 生成ACK帧, 返回新创建的包个数(每个包空间单独一个包) */
 static unsigned
 generate_ack_frame (struct ietf_full_conn *conn, lsquic_time_t now)
 {
@@ -2034,8 +2039,8 @@ generate_ack_frame (struct ietf_full_conn *conn, lsquic_time_t now)
                 ABORT_ERROR("cannot allocate packet: %s", strerror(errno));
                 return 0;
             }
-            s = generate_ack_frame_for_pns(conn, packet_out, pns, now);
-            lsquic_send_ctl_scheduled_one(&conn->ifc_send_ctl, packet_out);
+            s = generate_ack_frame_for_pns(conn, packet_out, pns, now); /* 生成ACK帧 */
+            lsquic_send_ctl_scheduled_one(&conn->ifc_send_ctl, packet_out); /* 加入schedule队列尾部 */
             if (s != 0)
                 return 0;
             ++count;
@@ -2061,6 +2066,9 @@ get_writeable_packet_on_path (struct ietf_full_conn *conn,
 }
 
 
+/* 检查schedule队列同路径的最后一个包是否还有need_at_least空间, 有则使用
+ * 没有则尝试新分配一个包, 若cwnd或者pacing受限则返回NULL
+ */
 static struct lsquic_packet_out *
 get_writeable_packet (struct ietf_full_conn *conn, unsigned need_at_least)
 {
@@ -2072,15 +2080,18 @@ get_writeable_packet (struct ietf_full_conn *conn, unsigned need_at_least)
 static void
 generate_max_data_frame (struct ietf_full_conn *conn)
 {
-    const uint64_t offset = lsquic_cfcw_get_fc_recv_off(&conn->ifc_pub.cfcw);
+    const uint64_t offset = lsquic_cfcw_get_fc_recv_off(&conn->ifc_pub.cfcw); /* 连接流控限制 */
     struct lsquic_packet_out *packet_out;
     unsigned need;
     int w;
 
+    /* iquic调用ietf_v1_max_data_frame_size()计算MAX_DATA帧长度 */
     need = conn->ifc_conn.cn_pf->pf_max_data_frame_size(offset);
+    /* 获取要写入的包(schedule队列中) */
     packet_out = get_writeable_packet(conn, need);
     if (!packet_out)
         return;
+    /* iquic调用ietf_v1_gen_max_data_frame()在packet_out的po_data中写入MAX_DATA帧 */
     w = conn->ifc_conn.cn_pf->pf_gen_max_data_frame(
                          packet_out->po_data + packet_out->po_data_sz,
                          lsquic_packet_out_avail(packet_out), offset);
@@ -2092,6 +2103,7 @@ generate_max_data_frame (struct ietf_full_conn *conn)
     LSQ_DEBUG("generated %d-byte MAX_DATA frame (offset: %"PRIu64")", w, offset);
     EV_LOG_CONN_EVENT(LSQUIC_LOG_CONN_ID, "generated MAX_DATA frame, offset=%"
                                                                 PRIu64, offset);
+    /* 将帧信息加入到包中 */
     if (0 != lsquic_packet_out_add_frame(packet_out, conn->ifc_pub.mm, 0,
                             QUIC_FRAME_MAX_DATA, packet_out->po_data_sz, w))
     {
@@ -2931,6 +2943,7 @@ service_streams (struct ietf_full_conn *conn)
 }
 
 
+/* 发送MAX_STREAM_DATA/STREAM_DATA_BLOCKED/RESET_STREAM/STOP_SENDING帧 */
 static int
 process_stream_ready_to_send (struct ietf_full_conn *conn,
                                             struct lsquic_stream *stream)
@@ -2948,6 +2961,9 @@ process_stream_ready_to_send (struct ietf_full_conn *conn,
 }
 
 
+/* 遍历连接中sending_streams中的流发送MAX_STREAM_DATA/STREAM_DATA_BLOCKED/RESET_STREAM/STOP_SENDING帧
+ * (在之前流需要发送这几种帧之前会先将流加入sending_streams队列中)
+ */
 static void
 process_streams_ready_to_send (struct ietf_full_conn *conn)
 {
@@ -2963,7 +2979,7 @@ process_streams_ready_to_send (struct ietf_full_conn *conn)
 
     for (stream = conn->ifc_pii->pii_first(&pi); stream;
                                     stream = conn->ifc_pii->pii_next(&pi))
-        if (!process_stream_ready_to_send(conn, stream))
+        if (!process_stream_ready_to_send(conn, stream)) /* 发送帧 */
             break;
 
     conn->ifc_pii->pii_cleanup(&pi);
@@ -4386,7 +4402,7 @@ process_streams_read_events (struct ietf_full_conn *conn)
                                         stream = conn->ifc_pii->pii_next(&pi))
         {
             q_flags = stream->sm_qflags & SMQF_SERVICE_FLAGS;
-            lsquic_stream_dispatch_read_events(stream);
+            lsquic_stream_dispatch_read_events(stream); /* 这里调用上层接口读取流帧数据 */
             needs_service |= q_flags ^ (stream->sm_qflags & SMQF_SERVICE_FLAGS);
         }
         conn->ifc_pii->pii_cleanup(&pi);
@@ -6124,6 +6140,7 @@ process_ping_frame (struct ietf_full_conn *conn,
 
     LSQ_DEBUG("received PING frame, update last progress to %"PRIu64,
                                             conn->ifc_pub.last_tick);
+    /* PING帧会更新连接最后处理时间, 防止因为空闲超时被断开 */
     conn->ifc_pub.last_prog = conn->ifc_pub.last_tick;
 
     return 1; /* PING帧只有1字节 */
@@ -6733,6 +6750,7 @@ process_streams_blocked_frame (struct ietf_full_conn *conn,
 }
 
 
+/* 接收数据阻塞帧 */
 static unsigned
 process_blocked_frame (struct ietf_full_conn *conn,
         struct lsquic_packet_in *packet_in, const unsigned char *p, size_t len)
@@ -6740,6 +6758,7 @@ process_blocked_frame (struct ietf_full_conn *conn,
     uint64_t peer_off;
     int parsed_len;
 
+    /* iquic调用ietf_v1_parse_blocked_frame() */
     parsed_len = conn->ifc_conn.cn_pf->pf_parse_blocked_frame(p, len,
                                                                 &peer_off);
     if (parsed_len < 0)
@@ -8170,22 +8189,25 @@ static void (*const send_funcs[N_SEND])(
 
 
 /* This should be called before lsquic_alarmset_ring_expired() */
+/* 设置连接空闲超时断开定时器(AL_IDLE) */
 static void
 maybe_set_noprogress_alarm (struct ietf_full_conn *conn, lsquic_time_t now)
 {
     lsquic_time_t exp;
 
+    /* 开启了空闲超时断开(服务端默认60秒, 客户端默认不超时断开) */
     if (conn->ifc_mflags & MF_NOPROG_TIMEOUT)
     {
         if (conn->ifc_pub.last_tick)
         {
+            /* 根据空闲断开时间设置空闲超时定时器 */
             exp = conn->ifc_pub.last_prog + conn->ifc_enpub->enp_noprog_timeout;
             if (!lsquic_alarmset_is_set(&conn->ifc_alset, AL_IDLE)
                                     || exp < conn->ifc_alset.as_expiry[AL_IDLE])
                 lsquic_alarmset_set(&conn->ifc_alset, AL_IDLE, exp);
             conn->ifc_pub.last_tick = now;
         }
-        else
+        else /* 首次进入 */
         {
             conn->ifc_pub.last_tick = now;
             conn->ifc_pub.last_prog = now;
@@ -8543,23 +8565,25 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
 
     CONN_STATS(n_ticks, 1);
 
-    CLOSE_IF_NECESSARY();
+    CLOSE_IF_NECESSARY(); /* 检查是否直接关闭连接 */
 
-    /* 如果有缓存的ack则处理(process_ack_frame()里会将ack信息缓存起来) */
+    /* 接收ACK帧时有缓存的ack则处理(process_ack_frame()里会将ack信息缓存起来) */
     if (conn->ifc_flags & IFC_HAVE_SAVED_ACK)
     {
+        /* 这里处理ACK */
         (void) /* If there is an error, we'll fail shortly */
         process_ack(conn, &conn->ifc_ack, conn->ifc_saved_ack_received, now);
         conn->ifc_flags &= ~IFC_HAVE_SAVED_ACK;
     }
 
+    /* 设置连接空闲超时断开定时器(AL_IDLE) */
     maybe_set_noprogress_alarm(conn, now);
 
     lsquic_send_ctl_tick_in(&conn->ifc_send_ctl, now);
-    lsquic_send_ctl_set_buffer_stream_packets(&conn->ifc_send_ctl, 1);
+    lsquic_send_ctl_set_buffer_stream_packets(&conn->ifc_send_ctl, 1); /* 设置SC_BUFFER_STREAM标志 */
     CLOSE_IF_NECESSARY();
 
-    /* 定时器处理 */
+    /* 定时器超时处理 */
     lsquic_alarmset_ring_expired(&conn->ifc_alset, now);
     CLOSE_IF_NECESSARY();
 
@@ -8567,16 +8591,23 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
      * has been completed.  This will be adjusted in the future: the client
      * does not want to wait if it has the server information.
      */
+    /* 这里回调上层接口来接收数据
+     * 之前在接收流帧时会将连接加入tickable队列:
+     * process_stream_frame()
+     * -> lsquic_stream_frame_in()
+     *   -> maybe_conn_to_tickable_if_readable()
+     */
     if (conn->ifc_conn.cn_flags & LSCONN_HANDSHAKE_DONE)
         process_streams_read_events(conn);
     else
         process_crypto_stream_read_events(conn);
     CLOSE_IF_NECESSARY();
 
+    /* pacing阻塞了本tick不能发送 */
     if (lsquic_send_ctl_pacer_blocked(&conn->ifc_send_ctl))
         goto end_write;
 
-    if (conn->ifc_flags & IFC_FIRST_TICK)
+    if (conn->ifc_flags & IFC_FIRST_TICK) /* 连接第一次进入tick */
     {
         conn->ifc_flags &= ~IFC_FIRST_TICK;
         have_delayed_packets = 0;
@@ -8588,22 +8619,30 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
          * we sometimes add is a packet with an ACK frame, and we add it
          * to the *front* of the queue.
          */
+        /* 为1说明schedule队列有数据包(上个tick周期的)被延迟没有发出 */
         have_delayed_packets =
             lsquic_send_ctl_maybe_squeeze_sched(&conn->ifc_send_ctl);
 
+    /* 若需要则发送ACK帧 */
     if (should_generate_ack(conn, IFC_ACK_QUEUED) ||
                         (!have_delayed_packets && maybe_queue_opp_ack(conn)))
     {
         if (have_delayed_packets)
             lsquic_send_ctl_reset_packnos(&conn->ifc_send_ctl);
 
-        n = generate_ack_frame(conn, now);
+        n = generate_ack_frame(conn, now); /* 生成ACK帧到schedule队列尾部 */
         CLOSE_IF_NECESSARY();
 
+        /* 如果之前包被延迟未发送, 则将刚刚生成的ACK帧移到schedule队列首部(ACK帧需要优先?) */
         if (have_delayed_packets && n)
             lsquic_send_ctl_ack_to_front(&conn->ifc_send_ctl, n);
     }
 
+    /* 如果有被延迟未发送的数据包, 那么直接结束tick
+     * 原因见下面注释:
+     * 不将下面的其他帧添加到存在延迟数据包时生成的携带ACK帧的包中,
+     * 是为了如果ACK数据包本身被延迟, 它可以被丢弃并被新的ACK包取代.
+     */
     if (have_delayed_packets)
     {
         /* The reason for not adding the other frames below to the packet
@@ -8622,11 +8661,14 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     /* Try to fit MAX_DATA before checking if we have run out of room.
      * If it does not fit, it will be tried next time around.
      */
+    /* 更新连接流控窗口(上层读取接收窗口一半后增加接收窗口),
+     * 若更新则需要发送MAX_DATA最大数据量帧通知对端
+     */
     if (lsquic_cfcw_fc_offsets_changed(&conn->ifc_pub.cfcw) ||
                                 (conn->ifc_send_flags & SF_SEND_MAX_DATA))
     {
         conn->ifc_send_flags |= SF_SEND_MAX_DATA;
-        generate_max_data_frame(conn);
+        generate_max_data_frame(conn); /* 生成最大数据量帧 */
         CLOSE_IF_NECESSARY();
     }
 
@@ -8656,6 +8698,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
             conn->ifc_conn.cn_flags &= ~LSCONN_SEND_BLOCKED;
     }
 
+    /* 发送MAX_STREAM_DATA/STREAM_DATA_BLOCKED/RESET_STREAM/STOP_SENDING帧 */
     if (!TAILQ_EMPTY(&conn->ifc_pub.sending_streams))
     {
         process_streams_ready_to_send(conn);
