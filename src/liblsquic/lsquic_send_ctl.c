@@ -1435,7 +1435,7 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
                 packet_sz = packet_out_sent_sz(packet_out); /* 数据大小 */
                 /* 将packet_out从sc_unacked_packets队列中删除 */
                 send_ctl_unacked_remove(ctl, packet_out, packet_sz);
-                lsquic_packet_out_ack_streams(packet_out);
+                lsquic_packet_out_ack_streams(packet_out); /* 流粒度 对帧的确认 */
                 LSQ_DEBUG("acking via regular record #%"PRIu64,
                                                         packet_out->po_packno);
             }
@@ -2609,6 +2609,10 @@ lsquic_send_ctl_set_tcid0 (lsquic_send_ctl_t *ctl, int tcid0)
  * have already been sent, and lost packets' reset stream frames will be
  * elided in due time.
  */
+/* 删除流ID为stream_id的所有流帧
+ * 包括scheduled队列(将要发送)和buffered队列(等待发送)中的包的流帧
+ * unacked队列(已发送)和lost队列(丢失)的包不需要处理
+ */
 void
 lsquic_send_ctl_elide_stream_frames (lsquic_send_ctl_t *ctl,
                                                 lsquic_stream_id_t stream_id)
@@ -2621,6 +2625,7 @@ lsquic_send_ctl_elide_stream_frames (lsquic_send_ctl_t *ctl,
 #ifdef WIN32
     next = NULL;
 #endif
+    /* 遍历scheduled队列, 删除所有包中流ID为stream_id的流帧 */
     for (packet_out = TAILQ_FIRST(&ctl->sc_scheduled_packets); packet_out;
                                                             packet_out = next)
     {
@@ -2629,10 +2634,11 @@ lsquic_send_ctl_elide_stream_frames (lsquic_send_ctl_t *ctl,
         if ((packet_out->po_frame_types & (1 << QUIC_FRAME_STREAM))
                                     && 0 == (packet_out->po_flags & PO_MINI))
         {
+            /* 删除packet中stream_id流的流帧, 返回删除帧的字节数 */
             adj = lsquic_packet_out_elide_reset_stream_frames(packet_out,
                                                               stream_id);
             ctl->sc_bytes_scheduled -= adj;
-            if (0 == packet_out->po_frame_types)
+            if (0 == packet_out->po_frame_types) /* pacekt的帧都被删除了, 删除packet */
             {
                 LSQ_DEBUG("cancel packet #%"PRIu64" after eliding frames for "
                     "stream %"PRIu64, packet_out->po_packno, stream_id);
@@ -2644,9 +2650,11 @@ lsquic_send_ctl_elide_stream_frames (lsquic_send_ctl_t *ctl,
         }
     }
 
+    /* 有packet被整个删除, 需重新设置包号 */
     if (dropped)
         lsquic_send_ctl_reset_packnos(ctl);
 
+    /* 遍历发送buffered队列, 删除所有包中流ID为stream_id的流帧 */
     for (n = 0; n < sizeof(ctl->sc_buffered_packets) /
                                 sizeof(ctl->sc_buffered_packets[0]); ++n)
     {
@@ -2656,8 +2664,9 @@ lsquic_send_ctl_elide_stream_frames (lsquic_send_ctl_t *ctl,
             next = TAILQ_NEXT(packet_out, po_next);
             if (packet_out->po_frame_types & (1 << QUIC_FRAME_STREAM))
             {
+                /* 删除packet中stream_id流的流帧 */
                 lsquic_packet_out_elide_reset_stream_frames(packet_out, stream_id);
-                if (0 == packet_out->po_frame_types)
+                if (0 == packet_out->po_frame_types) /* pacekt的帧都被删除了, 删除packet */
                 {
                     LSQ_DEBUG("cancel buffered packet in queue #%u after eliding "
                         "frames for stream %"PRIu64, n, stream_id);

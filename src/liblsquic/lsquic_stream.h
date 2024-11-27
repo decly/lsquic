@@ -157,6 +157,7 @@ enum stream_q_flags
     SMQF_SEND_WUF     = 1 << 3,     /* WUF: Window Update Frame */
     SMQF_SEND_BLOCKED = 1 << 4,
     SMQF_SEND_RST     = 1 << 5,     /* Error: want to send RST_STREAM */
+                                    /* 要发送RESET_STREAM帧, 但还未发送 */
     SMQF_SEND_STOP_SENDING = 1 << 10,
 
     /* The equivalent of WINDOW_UPDATE frame for streams in IETF QUIC is
@@ -218,7 +219,7 @@ enum stream_flags {
     STREAM_U_READ_DONE  = 1 << 3,   /* User is done reading (shutdown was called) */
     STREAM_U_WRITE_DONE = 1 << 4,   /* User is done writing (shutdown was called) */
     STREAM_FIN_SENT     = 1 << 5,   /* FIN was written to network */
-    STREAM_RST_SENT     = 1 << 6,   /* RST_STREAM was written to network */
+    STREAM_RST_SENT     = 1 << 6,   /* RST_STREAM was written to network *//* 流发送了RESET_STREAM帧 */
     STREAM_FIN_REACHED  = 1 << 7,   /* User read data up to FIN */
     STREAM_FINISHED     = 1 << 8,   /* Stream is finished */
     STREAM_ONCLOSE_DONE = 1 << 9,   /* on_close has been called */
@@ -234,7 +235,7 @@ enum stream_flags {
     STREAM_NOPUSH       = 1 << 19,  /* Disallow further push promises */
     STREAM_GOAWAY_IN    = 1 << 20,  /* Incoming GOAWAY has been processed */
     STREAM_SS_SENT      = 1 << 21,  /* STOP_SENDING sent */
-    STREAM_RST_ACKED    = 1 << 22,  /* Packet containing RST has been acked */
+    STREAM_RST_ACKED    = 1 << 22,  /* Packet containing RST has been acked *//* 流重置帧被确认了 */
     STREAM_BLOCKED_SENT = 1 << 23,  /* Stays set once a STREAM_BLOCKED frame is sent */
     STREAM_RST_READ     = 1 << 24,  /* User code collected the error */
     STREAM_DATA_RECVD   = 1 << 25,  /* Cache stream state calculation */
@@ -258,7 +259,9 @@ struct lsquic_stream /* 流结构, 表示一条流 */
     enum stream_flags               stream_flags;
     enum stream_b_flags             sm_bflags;
     enum stream_q_flags             sm_qflags;
-    unsigned                        n_unacked;
+    unsigned                        n_unacked;      /* 流中帧的个数(包括未发送和已发送的),
+                                                     * 类型包括STREAM帧/CRYPTO帧/RESET_STREAM帧
+                                                     */
 
     const struct lsquic_stream_if  *stream_if;      /* 上层服务提供的回调接口, 即lsquic_engine_public->enp_stream_if */
     struct lsquic_stream_ctx       *st_ctx;
@@ -455,6 +458,7 @@ void
 lsquic_stream_destroy (lsquic_stream_t *);
 
 /* True if either read or write side of the stream has been reset */
+/* 收到/发送了RESET_STREAM帧 或 收到STOP_SENDING帧 或 将要发送RESET_STREAM */
 #define lsquic_stream_is_reset(stream) \
     (((stream)->stream_flags & \
                     (STREAM_RST_RECVD|STREAM_RST_SENT|STREAM_SS_RECVD)) \

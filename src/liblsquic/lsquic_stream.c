@@ -890,8 +890,12 @@ stream_readable_discard (struct lsquic_stream *stream)
 static int
 stream_is_read_reset (const struct lsquic_stream *stream)
 {
+    /* iquic的流重置帧是单向的, 收到对端的流重置帧才算读重置 */
     if (stream->sm_bflags & SMBF_IETF)
         return stream->stream_flags & STREAM_RST_RECVD;
+    /* gquic的流重置帧是双向的, 收到流重置帧会直接回复流重置帧
+     * 所以收到或发送/将要发送 流重置帧都算读重置
+     */
     else
         return (stream->stream_flags & (STREAM_RST_RECVD|STREAM_RST_SENT))
             || (stream->sm_qflags & SMQF_SEND_RST);
@@ -925,6 +929,9 @@ int
 lsquic_stream_is_write_reset (const struct lsquic_stream *stream)
 {
     /* The two protocols use different frames to effect write reset: */
+    /* iquic 收到STOP_SENDING 或 发送/将发送RESET_STREAM帧
+     * gquic 收到或发送/将要发送 RESET_STREAM 帧
+     */
     const enum stream_flags cause_flag = stream->sm_bflags & SMBF_IETF
         ? STREAM_SS_RECVD : STREAM_RST_RECVD;
     return (stream->stream_flags & (cause_flag|STREAM_RST_SENT))
@@ -1208,6 +1215,7 @@ drop_frames_in (lsquic_stream_t *stream)
 }
 
 
+/* 删除该流的所有未发送的流帧 */
 static void
 maybe_elide_stream_frames (struct lsquic_stream *stream)
 {
@@ -1304,10 +1312,17 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
     /* 将缓存的接收的所有数据直接清除 */
     drop_frames_in(stream);
 
+    /* gquic会删除该流的所有数据和未发送的流帧
+     *
+     * (gquic的RESET_STREAM帧是双向的, 收到RESET_STREAM帧会直接重置流
+     *  并回复RESET_STREAM;
+     *  而iqcui是单向的, 收到RESET_STREAM帧只说明不再接收对端流帧,
+     *  本端还是可以发送流帧, 所以不会回复RESET_STREAM帧)
+     */
     if (!(stream->sm_bflags & SMBF_IETF))
     {
         drop_buffered_data(stream);
-        maybe_elide_stream_frames(stream);
+        maybe_elide_stream_frames(stream); /* 删除该流所有未发送的流帧 */
     }
 
     if (stream->sm_qflags & SMQF_WAIT_FIN_OFF)
@@ -1316,11 +1331,12 @@ lsquic_stream_rst_in (lsquic_stream_t *stream, uint64_t offset,
         LSQ_DEBUG("final offset is now known: %"PRIu64, offset);
     }
 
+    /* gguic收到RESET_STREAM帧后会直接重置流并发送RESET_STREAM */
     if (!(stream->stream_flags &
                         (STREAM_RST_SENT|STREAM_SS_SENT|STREAM_FIN_SENT))
-                            && !(stream->sm_bflags & SMBF_IETF)
+                            && !(stream->sm_bflags & SMBF_IETF) /* iquic不会发送RESET_STREAM */
                                     && !(stream->sm_qflags & SMQF_SEND_RST))
-        stream_reset(stream, 7 /* QUIC_RST_ACKNOWLEDGEMENT */, 0);
+        stream_reset(stream, 7 /* QUIC_RST_ACKNOWLEDGEMENT */, 0); /* 重置流 */
 
     stream->stream_flags |= STREAM_RST_RECVD;
 
@@ -4346,6 +4362,7 @@ lsquic_stream_maybe_reset (struct lsquic_stream *stream, uint64_t error_code,
 static void
 stream_reset (struct lsquic_stream *stream, uint64_t error_code, int do_close)
 {
+    /* 已经(或将要)发送RESET_STREAM帧 */
     if ((stream->stream_flags & STREAM_RST_SENT)
                                     || (stream->sm_qflags & SMQF_SEND_RST))
     {
@@ -4362,7 +4379,7 @@ stream_reset (struct lsquic_stream *stream, uint64_t error_code, int do_close)
         TAILQ_INSERT_TAIL(&stream->conn_pub->sending_streams, stream,
                                                         next_send_stream);
     stream->sm_qflags &= ~SMQF_SENDING_FLAGS;
-    stream->sm_qflags |= SMQF_SEND_RST;
+    stream->sm_qflags |= SMQF_SEND_RST; /* 设置要发送 RESET_STREAM */
 
     if (stream->sm_qflags & SMQF_QPACK_DEC)
     {
@@ -4371,7 +4388,7 @@ stream_reset (struct lsquic_stream *stream, uint64_t error_code, int do_close)
     }
 
     drop_buffered_data(stream);
-    maybe_elide_stream_frames(stream);
+    maybe_elide_stream_frames(stream); /* 删除所有未发送的流帧 */
     maybe_schedule_call_on_close(stream);
 
     if (do_close)

@@ -403,6 +403,7 @@ lsquic_packet_out_ack_streams (lsquic_packet_out_t *packet_out)
 {
     struct packet_out_frec_iter pofi;
     struct frame_rec *frec;
+    /* 遍历packet的帧, 对流帧等进行确认 */
     for (frec = lsquic_pofi_first(&pofi, packet_out); frec;
                                                 frec = lsquic_pofi_next(&pofi))
         if ((1 << frec->fe_frame_type)

@@ -1627,7 +1627,7 @@ process_stream_frame (struct full_conn *conn, lsquic_packet_in_t *packet_in,
     stream = find_stream_by_id(conn, stream_frame->stream_id);
     if (stream)
     {
-        if (lsquic_stream_is_reset(stream))
+        if (lsquic_stream_is_reset(stream)) /* 该流收到或发送了流重置帧, 不再接收了  */
         {
             LSQ_DEBUG("stream %"PRIu64" is reset, ignore frame", stream->id);
             lsquic_malo_put(stream_frame);

@@ -101,7 +101,10 @@ typedef struct lsquic_send_ctl {
                                     sc_lost_packets;		/* 丢包队列, 检测丢包时会将数据包加入该队列
                                                              * 在lsquic_send_ctl_reschedule_packets()中被重传
                                                              */
-    struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1];
+    struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1]; /* 发送buffer队列
+                                                                              * 发送时从buffer队列获取包然后加入sc_scheduled_packets队列
+                                                                              * 可见: lsquic_send_ctl_schedule_buffered()
+                                                                              */
     const struct ver_neg           *sc_ver_neg;
     struct lsquic_conn_public      *sc_conn_pub;
     struct pacer                    sc_pacer;               /* pacing控制 */

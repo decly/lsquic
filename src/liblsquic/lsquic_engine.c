@@ -1804,7 +1804,8 @@ process_packet_in (lsquic_engine_t *engine, lsquic_packet_in_t *packet_in,
     packet_in_data = packet_in->pi_data;
     packet_in_size = packet_in->pi_data_sz;
     /* 这里处理解析数据包
-     * iquic的full conn的函数为ietf_full_conn_ci_packet_in, 解析各类帧
+     * iquic的full conn的函数为 ietf_full_conn_ci_packet_in, 解析各类帧
+     * gquic的full conn的函数为 full_conn_ci_packet_in
      */
     conn->cn_if->ci_packet_in(conn, packet_in);
 #if LSQUIC_CONN_STATS
