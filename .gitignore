@@ -10,3 +10,5 @@ cscope.*
 GPATH
 GRTAGS
 GTAGS
+/.vimrc
+/.cache
