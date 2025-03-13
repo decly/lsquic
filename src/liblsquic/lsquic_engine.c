@@ -3124,8 +3124,11 @@ process_connections (lsquic_engine_t *engine, conn_iter_f next_conn,
     while ((conn = next_conn(engine)) /* 即conn_iter_next_tickable() */
                             || (conn = next_new_full_conn(&new_full_conns)))
     {
-        tick_st = conn->cn_if->ci_tick(conn, now); /* full conn调用ietf_full_conn_ci_tick
-                                                    * mini conn调用ietf_mini_conn_ci_tick 
+        tick_st = conn->cn_if->ci_tick(conn, now); /* iquic:
+                                                        full conn调用ietf_full_conn_ci_tick
+                                                    *   mini conn调用ietf_mini_conn_ci_tick 
+                                                    * gquic:
+                                                        full conn调用full_conn_ci_tick
                                                     * */
 #if LSQUIC_CONN_STATS
         if (conn == engine->busy.current)

@@ -88,7 +88,10 @@ typedef struct lsquic_send_ctl {
     unsigned                        sc_n_consec_rtos;       /* RTO指数退避, 即当前连续RTO次数 */
     unsigned                        sc_n_hsk;
     unsigned                        sc_n_tlp;               /* 此时发出的TLP的包个数 */
-    enum quic_ft_bit                sc_retx_frames;		    /* 如果丢失需要重传的帧类型 */
+    enum quic_ft_bit                sc_retx_frames;		    /* 如果丢失需要重传的帧类型
+                                                             * iquic类型包括 IQUIC_FRAME_RETX_MASK
+                                                             * gquic类型包括 GQUIC_FRAME_RETRANSMITTABLE_MASK
+                                                             */
     struct lsquic_alarmset         *sc_alset;               /* 定时器集合, 实际上指向conn->ifc_alset,
                                                              * 定时器超时处理在lsquic_alarmset_ring_expired()
                                                              */
