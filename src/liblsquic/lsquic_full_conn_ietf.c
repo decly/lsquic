@@ -4462,6 +4462,10 @@ maybe_conn_flush_special_streams (struct ietf_full_conn *conn)
 }
 
 
+/* 判断当前上层是否要继续写数据
+ * - 当前scheduled队列的最后一个包剩余空间超过10
+ * - 或者send_ctl可以发送数据, 即没有受到pacer和cwnd的限制
+ */
 static int
 write_is_possible (struct ietf_full_conn *conn)
 {
@@ -4480,22 +4484,25 @@ process_streams_write_events (struct ietf_full_conn *conn, int high_prio)
     struct lsquic_stream *stream;
     union prio_iter pi;
 
+    /* pi是为了对流进行优先级排序 */
     conn->ifc_pii->pii_init(&pi, TAILQ_FIRST(&conn->ifc_pub.write_streams),
         TAILQ_LAST(&conn->ifc_pub.write_streams, lsquic_streams_tailq),
         (uintptr_t) &TAILQ_NEXT((lsquic_stream_t *) NULL, next_write_stream),
         &conn->ifc_pub,
         high_prio ? "write-high" : "write-low", NULL, NULL);
 
+    /* 根据参数来决定过滤高/低优先级过滤流 */
     if (high_prio)
         conn->ifc_pii->pii_drop_non_high(&pi);
     else
         conn->ifc_pii->pii_drop_high(&pi);
 
+    /* 遍历流来进行写操作 */
     for (stream = conn->ifc_pii->pii_first(&pi);
                         stream && write_is_possible(conn);
                                     stream = conn->ifc_pii->pii_next(&pi))
         if (stream->sm_qflags & SMQF_WRITE_Q_FLAGS)
-            lsquic_stream_dispatch_write_events(stream);
+            lsquic_stream_dispatch_write_events(stream); /* 流写操作 */
     conn->ifc_pii->pii_cleanup(&pi);
 
     maybe_conn_flush_special_streams(conn);
@@ -8603,7 +8610,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
         process_crypto_stream_read_events(conn);
     CLOSE_IF_NECESSARY();
 
-    /* pacing阻塞了本tick不能发送 */
+    /* pacing阻塞了本tick不能发送, 跳过下面所有发送和写数据的流程 */
     if (lsquic_send_ctl_pacer_blocked(&conn->ifc_send_ctl))
         goto end_write;
 
@@ -8686,7 +8693,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     if (conn->ifc_mflags & MF_CHECK_MTU_PROBE)
         check_or_schedule_mtu_probe(conn, now);
 
-    /* 重传丢包 */
+    /* 重传丢包队列(sc_lost_packets)中的数据包 */
     n = lsquic_send_ctl_reschedule_packets(&conn->ifc_send_ctl);
     if (n > 0)
         CLOSE_IF_NECESSARY();
@@ -8705,6 +8712,56 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
         CLOSE_IF_NECESSARY();
     }
 
+    /* 这里开始到 end_write 之间是 数据发送和回调写数据的流程
+     *
+     * 在写入流数据时, 有两种方式:
+     * 1.上层在外部直接将数据写入sc_buffered_packets缓冲区, 通过直接调用lsquic_stream_write()等接口
+     * 2.通过上层指定的on_write()回调函数中将直接写入sc_scheduled_packets队列
+     *
+     * 发送和回调写的思路在commit c51ce3387f93 中有详细描述, 如下:
+     *
+     *   为了支持在 on_write() 回调函数之外的写入操作，我们为每个连接保留N个
+     *   数据包缓冲区, 其中一半缓冲区专用于最高优先级流, 另一半用于所有其他流.
+     *   这样, 低优先级流不能取代高优先级流进行写入, 而低优先级流也有机会发送数据包.
+     *
+     *   该算法如下所示：
+     *
+     *   - 当用户在回调函数外对流进行写入时:
+     *     - 如果这是最高优先级流, 将其放入保留的 N/2 队列中
+     *       (这个队列的实际大小是动态的: MAX(N/2, CWND), 而不是固定 N/2,
+     *        这允许高优先级流写入尽可能多的发送数据)
+     *     - 如果该流不是最高优先级, 则尝试将数据放入保留的 N/2 队列中
+     *
+     *   - 当时钟周期发生(即这里的tick中)并且可以调度更多数据包时：
+     *     - 将数据包从高优先级 N/2 队列转移到scheduled队列
+     *     - 如果允许继续发送:
+     *       为最高优先级流调用 on_write() 回调函数, 直接将成的数据包放置到scheduled队列。
+     *     - 如果允许继续发送:
+     *       将数据包从低优先级 N/2 队列转移到scheduled队列。
+     *     - 如果允许继续发送:
+     *       为低优先级流调用 on_write() 回调函数, 直接将生成的数据包放置到scheduled队列。
+     *
+     *   目前, N的值为20, 但可以根据资源使用情况进行调整配置,
+     *   即 MAX_BPQ_COUNT 表示 N/2
+     */
+
+
+    /* 这里将SC_BUFFER_STREAM标志清除, 表示不使用sc_buffered_packets
+     * 来缓存上层的写数据, 而是直接写入到sc_scheduled_packets队列中.
+     *
+     * 原理是下面会回调上层的on_write()来回调写入数据:
+     * process_streams_write_events()
+     *   -> ... on_write()
+     *     -> ... stream_write()
+     *       -> ... lsquic_send_ctl_get_packet_for_stream()
+     *         -> lsquic_send_ctl_get_writeable_packet() //不使用buffered
+     * 这里分配packet时, 直接将packet加入scheduled队列.
+     *
+     * 在下面close_end退出tick时会恢复SC_BUFFER_STREAM标志, 也就说
+     * 只有在tick内部写数据时才直接使用sc_scheduled_packets队列,
+     * 而上层在tick外部直接通过lsquic_stream_write()写数据时, 是缓存在
+     * sc_buffered_packets队列中的.
+     */
     lsquic_send_ctl_set_buffer_stream_packets(&conn->ifc_send_ctl, 0);
     if (!(conn->ifc_conn.cn_flags & LSCONN_HANDSHAKE_DONE))
     {
@@ -8723,31 +8780,44 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
 
     maybe_conn_flush_special_streams(conn);
 
-    /* 发送数据 */
+    /* 高优先级流: 发送sc_buffered_packets中的数据包, 移动到sc_scheduled_packets队列 */
     s = lsquic_send_ctl_schedule_buffered(&conn->ifc_send_ctl, BPT_HIGHEST_PRIO);
     conn->ifc_flags |= (s < 0) << IFC_BIT_ERROR;
-    if (!write_is_possible(conn))
+    if (!write_is_possible(conn)) /* 无法继续发送则跳过写回调 */
         goto end_write;
 
     while ((conn->ifc_mflags & MF_WANT_DATAGRAM_WRITE) && write_datagram(conn))
         if (!write_is_possible(conn))
             goto end_write;
 
+    /* 高优先级流: 回调上层on_write()将数据直接写入sc_scheduled_packets队列
+     *
+     * 注意: 只有可以继续发送数据时才会在tick中回调写数据, 否则上面write_is_possible()
+     * 会直接跳到end_write. 所以on_write()是为了在tick内部数据发完后但send_ctl
+     * 还允许发送时来调用上层写入数据, 并且pacer只能允许写入1ms内要发送的数据,
+     * 否则要等tick后上层写入数据.
+     */
     if (!TAILQ_EMPTY(&conn->ifc_pub.write_streams))
     {
-        process_streams_write_events(conn, 1);
-        if (!write_is_possible(conn))
+        process_streams_write_events(conn, 1); /* 回调写数据 */
+        if (!write_is_possible(conn)) /* 无法继续发送则跳过写回调 */
             goto end_write;
     }
 
+    /* 其他优先级流: 发送sc_buffered_packets中的数据包, 移动到sc_scheduled_packets队列 */
     s = lsquic_send_ctl_schedule_buffered(&conn->ifc_send_ctl, BPT_OTHER_PRIO);
     conn->ifc_flags |= (s < 0) << IFC_BIT_ERROR;
-    if (!write_is_possible(conn))
+    if (!write_is_possible(conn)) /* 无法继续发送则跳过写回调 */
         goto end_write;
 
+    /* 其他优先级流: 回调上层on_write()将数据直接写入sc_scheduled_packets队列 */
     if (!TAILQ_EMPTY(&conn->ifc_pub.write_streams))
-        process_streams_write_events(conn, 0);
+        process_streams_write_events(conn, 0); /* 回调写数据 */
 
+    /* 检查设置是否app-lmited
+     * 在上面每次一进入tick时(lsquic_send_ctl_tick_in)会先清除app-limited标志,
+     * 这里再重新判断
+     */
     lsquic_send_ctl_maybe_app_limited(&conn->ifc_send_ctl, CUR_NPATH(conn));
 
   end_write:
@@ -8838,6 +8908,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
     CLOSE_IF_NECESSARY();
 
   close_end:
+    /* 恢复设置SC_BUFFER_STREAM标志, 只有在tick内才屏蔽buffered缓存 */
     lsquic_send_ctl_set_buffer_stream_packets(&conn->ifc_send_ctl, 1);
     lsquic_send_ctl_tick_out(&conn->ifc_send_ctl);
     return tick;

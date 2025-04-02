@@ -75,6 +75,7 @@ sfcw_maybe_increase_max_window (struct lsquic_sfcw *fc)
          */
     }
 
+    /* 接收窗口只会扩大, 不能缩小 */
     if (new_max_window > fc->sf_max_recv_win)
     {
         LSQ_DEBUG("max window increase %u -> %u",

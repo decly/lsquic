@@ -22,12 +22,16 @@ struct ver_neg;
 enum pns;
 struct to_coal;
 
+/* 流的优先级类型
+ * BPT_HIGHEST_PRIO: 优先级最高的流(或者所有流都一样的优先级)
+ * BPT_OTHER_PRIO: 其他优先级
+ */
 enum buf_packet_type { BPT_HIGHEST_PRIO, BPT_OTHER_PRIO, };
 
 struct buf_packet_q
 {
     struct lsquic_packets_tailq     bpq_packets;
-    unsigned                        bpq_count;
+    unsigned                        bpq_count;  /* bpq_packets中的包个数 */
 };
 
 enum send_ctl_flags {
@@ -35,7 +39,7 @@ enum send_ctl_flags {
     SC_NSTP         = (1 << 2),
     SC_PACE         = (1 << 3),		/* 使用pacing */
     SC_SCHED_TICK   = (1 << 4),
-    SC_BUFFER_STREAM= (1 << 5),
+    SC_BUFFER_STREAM= (1 << 5),     /* 使用sc_buffered_packets缓存packet, 否则直接加入sc_scheduled_packets队列 */
     SC_WAS_QUIET    = (1 << 6),
     SC_IETF         = (1 << 7),
 #define SCBIT_LOST_ACK_SHIFT 8
@@ -44,7 +48,7 @@ enum send_ctl_flags {
     SC_LOST_ACK_HSK = SC_LOST_ACK_INIT << PNS_HSK,
     SC_LOST_ACK_APP = SC_LOST_ACK_INIT << PNS_APP,
     SC_1RTT_ACKED   =  1 << 11,     /* 表示有APP数据被ack */
-    SC_APP_LIMITED  =  1 << 12,
+    SC_APP_LIMITED  =  1 << 12,     /* 表示当前app-lmited受限, 由lsquic_send_ctl_maybe_app_limited()设置 */
     SC_ECN          =  1 << 13,
     SC_QL_BITS      =  1 << 14,
     SC_SANITY_CHECK =  1 << 15,
@@ -104,8 +108,9 @@ typedef struct lsquic_send_ctl {
                                     sc_lost_packets;		/* 丢包队列, 检测丢包时会将数据包加入该队列
                                                              * 在lsquic_send_ctl_reschedule_packets()中被重传
                                                              */
-    struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1]; /* 发送buffer队列
-                                                                              * 发送时从buffer队列获取包然后加入sc_scheduled_packets队列
+    struct buf_packet_q             sc_buffered_packets[BPT_OTHER_PRIO + 1]; /* 发送buffer队列, 相当于待发送缓存
+                                                                              * 按照最高优先级和其他优先级分别存储
+                                                                              * tick发送时从buffer队列获取包然后加入sc_scheduled_packets队列
                                                                               * 可见: lsquic_send_ctl_schedule_buffered()
                                                                               */
     const struct ver_neg           *sc_ver_neg;
@@ -138,7 +143,7 @@ typedef struct lsquic_send_ctl {
     {
         lsquic_stream_id_t      stream_id;
         enum buf_packet_type    packet_type;
-    }                               sc_cached_bpt;
+    }                               sc_cached_bpt;  /* 缓存最近使用的流的优先级类型, 详见lsquic_send_ctl_determine_bpt() */
     unsigned                        sc_next_limit;  /* 表示当前限制发送的数据包个数, 比如RTO触发时限制发送2个包 */
     unsigned                        sc_n_scheduled;	/* sc_scheduled_packets队列中的包个数 */
     enum packno_bits                sc_max_packno_bits;

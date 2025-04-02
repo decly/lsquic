@@ -44,6 +44,7 @@ lsquic_pacer_cleanup (struct pacer *pacer)
 }
 
 
+/* 计算并设置下个数据包的发送时间 pacer->pa_next_sched */
 void
 lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
                             int in_recovery, tx_time_f tx_time, void *tx_ctx)
@@ -74,7 +75,11 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
     }
 
     sched_time = pacer->pa_now;
-    delay = tx_time(tx_ctx); /* 根据pacing_rate计算包发送时间 */
+    /* 计算一个包的发送时间:
+     *   delay = packet_size / pacing_rate
+     * tx_time为 send_ctl_transfer_time()
+     */
+    delay = tx_time(tx_ctx); 
     if (pacer->pa_flags & PA_LAST_SCHED_DELAYED)
     {
         pacer->pa_next_sched += delay;
@@ -90,7 +95,7 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
             pacer->pa_last_delayed = 0;
         }
     }
-    else /* 下个包的发送时间 直接加上本包发送时间 */
+    else /* 设置下个包的发送时间 直接加上本包发送时间 */
         pacer->pa_next_sched = MAX(pacer->pa_next_sched + delay,
                                                     sched_time + delay);
     LSQ_DEBUG("next_sched is set to %"PRIu64" usec from now",
@@ -115,7 +120,9 @@ lsquic_pacer_can_schedule (struct pacer *pacer, unsigned n_in_flight)
     /* 还有 不参与pacing的令牌 或者 idle restart 可以直接发送 */
     if (pacer->pa_burst_tokens > 0 || n_in_flight == 0)
         can = 1;
-    /* 下个包的发送时间超过了本tick时间, 就不可发送 */
+    /* 下个包的发送时间 超过了 当前tick时间+1ms, 则不能发送
+     * 也就是说pacer允许同时发送1~2ms(pa_clock_granularity)内的数据包
+     */
     else if (pacer->pa_next_sched > pacer->pa_now + pacer->pa_clock_granularity)
     {
         pacer->pa_flags |= PA_LAST_SCHED_DELAYED;

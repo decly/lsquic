@@ -145,6 +145,7 @@ static
 #elif __GNUC__
 __attribute__((weak))
 #endif
+/* 返回1说明直接使用sc_scheduled_packets队列, 而不用sc_buffered_packets缓存 */
 int
 lsquic_send_ctl_schedule_stream_packets_immediately (lsquic_send_ctl_t *ctl)
 {
@@ -1787,6 +1788,7 @@ lsquic_send_ctl_pacer_blocked (struct lsquic_send_ctl *ctl)
 #else
     if (ctl->sc_flags & SC_PACE)
     {
+        /* pacer阻塞无法发送数据 */
         const int blocked = !lsquic_pacer_can_schedule(&ctl->sc_pacer,
                                                ctl->sc_n_in_flight_all);
         LSQ_DEBUG("pacer blocked: %d, in_flight_all: %u", blocked,
@@ -1875,15 +1877,22 @@ send_ctl_could_send (const struct lsquic_send_ctl *ctl)
     uint64_t cwnd;
     unsigned n_out;
 
+    /* 被pacer限制了无法发送 */
     if ((ctl->sc_flags & SC_PACE) && lsquic_pacer_delayed(&ctl->sc_pacer))
         return 0;
 
     cwnd = ctl->sc_ci->cci_get_cwnd(CGP(ctl));
     n_out = send_ctl_all_bytes_out(ctl);
-    return n_out < cwnd;
+    return n_out < cwnd; /* inflight < cwnd 说明可以发送 */
 }
 
 
+/* 检查设置是否app-lmited:
+ * - 如果scheduled队列的最后一个包的剩余空间大于10, 则认为app-limited
+ *   因为上层数据写入会优先合并到最后一个包中, 这个包没满说明没有上层数据了
+ * - 如果此时没有被pacer阻塞, 并且inflight < cwnd, 也认为app-limited
+ *   这说明pacer和cwnd都没有限制, 那只能是数据不足了
+ */
 void
 lsquic_send_ctl_maybe_app_limited (struct lsquic_send_ctl *ctl,
                                             const struct network_path *path)
@@ -2019,6 +2028,7 @@ lsquic_send_ctl_do_sanity_check (const struct lsquic_send_ctl *ctl)
 #endif
 
 
+/* 发送一个packet: 设置pacer时间并加入scheduled队列 */
 void
 lsquic_send_ctl_scheduled_one (lsquic_send_ctl_t *ctl,
                                             lsquic_packet_out_t *packet_out)
@@ -2453,6 +2463,12 @@ lsquic_send_ctl_last_scheduled (struct lsquic_send_ctl *ctl,
 
 /* Do not use for STREAM frames
  */
+/* 获取packet并将其加入sc_scheduled_packets队列待发送
+ * 会受到pacer和cwnd的限制而失败
+ *
+ * 注: 上面的注释有误, STREAM frames在tick内部被写入也会使用这个函数,
+ * 详见lsquic_send_ctl_get_packet_for_stream()
+ */
 lsquic_packet_out_t *
 lsquic_send_ctl_get_writeable_packet (lsquic_send_ctl_t *ctl,
                 enum packnum_space pns, unsigned need_at_least,
@@ -2868,6 +2884,9 @@ static
 #elif __GNUC__
 __attribute__((weak))
 #endif
+/* 判断流是否是最高优先级的流
+ * 遍历所有流, 若存在其他优先级更高的流返回BPT_OTHER_PRIO, 否则返回BPT_HIGHEST_PRIO
+ */
 enum buf_packet_type
 lsquic_send_ctl_determine_bpt (lsquic_send_ctl_t *ctl,
                                             const lsquic_stream_t *stream)
@@ -2884,27 +2903,34 @@ lsquic_send_ctl_determine_bpt (lsquic_send_ctl_t *ctl,
         if (other_stream != stream
               && (!(other_stream->stream_flags & STREAM_U_WRITE_DONE))
                 && !lsquic_stream_is_critical(other_stream)
-                  && other_stream->sm_priority < stream->sm_priority)
+                  && other_stream->sm_priority < stream->sm_priority) /* 存在比本流的优先级高的 */
             return BPT_OTHER_PRIO;
     }
-    return BPT_HIGHEST_PRIO;
+    return BPT_HIGHEST_PRIO; /* 本流优先级最高 */
 }
 
 
+/* 返回stream的优先级类型 */
 static enum buf_packet_type
 send_ctl_lookup_bpt (lsquic_send_ctl_t *ctl,
                                         const struct lsquic_stream *stream)
 {
+    /* 缓存最近使用的流优先级类型, 不一样才重新查找  */
     if (ctl->sc_cached_bpt.stream_id != stream->id)
     {
         ctl->sc_cached_bpt.stream_id = stream->id;
         ctl->sc_cached_bpt.packet_type =
-                                lsquic_send_ctl_determine_bpt(ctl, stream);
+                                lsquic_send_ctl_determine_bpt(ctl, stream); /* 获取流优先级类型 */
     }
     return ctl->sc_cached_bpt.packet_type;
 }
 
 
+/* 根据流优先级类型返回sc_buffered_packets缓存限制的数据量:
+ * - 连接内最高优先级(BPT_HIGHEST_PRIO)一共可缓存
+ *      max(拥塞窗口剩余量的包个数, MAX_BPQ_COUNT) 个包
+ * - 其他优先级(BPT_OTHER_PRIO)一共只能缓存 MAX_BPQ_COUNT 个包
+ */
 static unsigned
 send_ctl_max_bpq_count (const lsquic_send_ctl_t *ctl,
                                         enum buf_packet_type packet_type)
@@ -2914,14 +2940,15 @@ send_ctl_max_bpq_count (const lsquic_send_ctl_t *ctl,
 
     switch (packet_type)
     {
-    case BPT_OTHER_PRIO:
+    case BPT_OTHER_PRIO: /* 非高优先级流, 只能缓存10个packet */
         return MAX_BPQ_COUNT;
     case BPT_HIGHEST_PRIO:
     default: /* clang does not complain about absence of `default'... */
-        count = ctl->sc_n_scheduled + ctl->sc_n_in_flight_retx;
+        count = ctl->sc_n_scheduled + ctl->sc_n_in_flight_retx; /* 所有inflight */
         cwnd = ctl->sc_ci->cci_get_cwnd(CGP(ctl));
-        if (count < cwnd / SC_PACK_SIZE(ctl))
+        if (count < cwnd / SC_PACK_SIZE(ctl)) /* inflight < cwnd */
         {
+            /* 高优先级流返回 max(拥塞窗口剩余量的包个数, MAX_BPQ_COUNT(10个)) */
             count = cwnd / SC_PACK_SIZE(ctl) - count;
             if (count > MAX_BPQ_COUNT)
                 return count;
@@ -2967,11 +2994,13 @@ send_ctl_move_ack (struct lsquic_send_ctl *ctl, struct lsquic_packet_out *dst,
 }
 
 
+/* 获取packet并将其加入sc_buffered_packets缓存 */
 static lsquic_packet_out_t *
 send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
             enum buf_packet_type packet_type, unsigned need_at_least,
             const struct network_path *path, const struct lsquic_stream *stream)
 {
+    /* 根据流优先级类型获取对应buffered */
     struct buf_packet_q *const packet_q =
                                     &ctl->sc_buffered_packets[packet_type];
     struct lsquic_conn *const lconn = ctl->sc_conn_pub->lconn;
@@ -2979,6 +3008,7 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
     enum packno_bits bits;
     enum { AA_STEAL, AA_GENERATE, AA_NONE, } ack_action;
 
+    /* 最后一个packet还没写满并且有空间, 则使用 */
     packet_out = TAILQ_LAST(&packet_q->bpq_packets, lsquic_packets_tailq);
     if (packet_out
         && !(packet_out->po_flags & PO_STREAM_END)
@@ -2987,12 +3017,21 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
         return packet_out;
     }
 
+    /* 限制buffered缓存的数据量, 缓存过多则先暂停写入流数据:
+     * - 连接内最高优先级(BPT_HIGHEST_PRIO)一共可缓存
+     *      max(拥塞窗口剩余量的包个数, MAX_BPQ_COUNT) 个包
+     * - 其他优先级(BPT_OTHER_PRIO)一共只能缓存 MAX_BPQ_COUNT 个包
+     */
     if (packet_q->bpq_count >= send_ctl_max_bpq_count(ctl, packet_type))
         return NULL;
 
+    /* 首个包 判断需不需要携带ACK帧 */
     if (packet_q->bpq_count == 0)
     {
         /* If ACK was written to the low-priority queue first, steal it */
+        /* 当前是最高优先级队列, 并且其他优先级队列中的首个包有ACK帧待发送
+         * 为了尽快发送ACK帧, 从其他优先级队列中的首个包中偷取ACK帧
+         */
         if (packet_q == &ctl->sc_buffered_packets[BPT_HIGHEST_PRIO]
             && !TAILQ_EMPTY(&ctl->sc_buffered_packets[BPT_OTHER_PRIO].bpq_packets)
             && (TAILQ_FIRST(&ctl->sc_buffered_packets[BPT_OTHER_PRIO].bpq_packets)
@@ -3003,6 +3042,7 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
             bits = ctl->sc_max_packno_bits;
         }
         /* If ACK can be generated, write it to the first buffered packet. */
+        /* 判断要不要生成ACK帧 */
         else if (lconn->cn_if->ci_can_write_ack(lconn))
         {
             LSQ_DEBUG("generate ACK frame for first buffered packet in "
@@ -3013,7 +3053,7 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
              */
             bits = ctl->sc_max_packno_bits;
         }
-        else
+        else /* 不需要携带ACK帧 */
             goto no_ack_action;
     }
     else
@@ -3023,14 +3063,16 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
         bits = lsquic_send_ctl_guess_packno_bits(ctl);
     }
 
+    /* 分配数据包 */
     packet_out = send_ctl_allocate_packet(ctl, bits, need_at_least, PNS_APP,
                                                                         path);
     if (!packet_out)
         return NULL;
 
+    /* 根据上面的结果来处理携不携带ACK帧 */
     switch (ack_action)
     {
-    case AA_STEAL:
+    case AA_STEAL: /* 这里将其他优先级的首个packet的ACK帧移到本packet中 */
         if (0 != send_ctl_move_ack(ctl, packet_out,
             TAILQ_FIRST(&ctl->sc_buffered_packets[BPT_OTHER_PRIO].bpq_packets)))
         {
@@ -3040,13 +3082,14 @@ send_ctl_get_buffered_packet (lsquic_send_ctl_t *ctl,
             return NULL;
         }
         break;
-    case AA_GENERATE:
+    case AA_GENERATE: /* 生成ACK帧 */
         lconn->cn_if->ci_write_ack(lconn, packet_out);
         break;
     case AA_NONE:
         break;
     }
 
+    /* 将申请的packet加入buffer队列 */
     TAILQ_INSERT_TAIL(&packet_q->bpq_packets, packet_out, po_next);
     ++packet_q->bpq_count;
     LSQ_DEBUG("Add new packet to buffered queue #%u; count: %u",
@@ -3074,6 +3117,13 @@ send_ctl_maybe_flush_decoder (struct lsquic_send_ctl *ctl,
 }
 
 
+/* 为stream获取一个packet
+ * - 如果是tick内部on_write回调写数据, 直接写入sc_scheduled_packets队列
+ *   但会受到pacer的限制, 只能写少量数据
+ *   详见lsquic_send_ctl_get_writeable_packet() -> lsquic_send_ctl_can_send()
+ * - 其他(包括tick外部写数据), 先缓存到sc_buffered_packets队列
+ *   受到cwnd的限制, 详见send_ctl_get_buffered_packet() -> send_ctl_max_bpq_count()
+ */
 lsquic_packet_out_t *
 lsquic_send_ctl_get_packet_for_stream (lsquic_send_ctl_t *ctl,
                 unsigned need_at_least, const struct network_path *path,
@@ -3081,14 +3131,19 @@ lsquic_send_ctl_get_packet_for_stream (lsquic_send_ctl_t *ctl,
 {
     enum buf_packet_type packet_type;
 
+    /* 在tick内部通过上层on_write回调写数据时屏蔽sc_buffered_packets缓存,
+     * 直接写入sc_scheduled_packets队列
+     */
     if (lsquic_send_ctl_schedule_stream_packets_immediately(ctl))
         return lsquic_send_ctl_get_writeable_packet(ctl, PNS_APP,
                                                 need_at_least, path, 0, NULL);
-    else
+    else /* 而上层在tick外部直接通过lsquic_stream_write()写数据时,
+          * 是缓存在sc_buffered_packets队列中
+          */
     {
         if (!lsquic_send_ctl_has_buffered(ctl))
             send_ctl_maybe_flush_decoder(ctl, stream);
-        packet_type = send_ctl_lookup_bpt(ctl, stream);
+        packet_type = send_ctl_lookup_bpt(ctl, stream); /* 确定当前流的优先级 */
         return send_ctl_get_buffered_packet(ctl, packet_type, need_at_least,
                                             path, stream);
     }
@@ -3288,7 +3343,7 @@ split_buffered_packet (lsquic_send_ctl_t *ctl,
 }
 
 
-/* 发送新数据 */
+/* 发送缓存在sc_buffered_packets中的数据, 移动到sc_scheduled_packets队列 */
 int
 lsquic_send_ctl_schedule_buffered (lsquic_send_ctl_t *ctl,
                                             enum buf_packet_type packet_type)

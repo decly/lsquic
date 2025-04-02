@@ -950,19 +950,23 @@ stream_writeable (struct lsquic_stream *stream)
          */
            lsquic_stream_is_write_reset(stream)
         /* - Data can be written to stream: */
+        /* 根据对端的流控(接收窗口)判断能否写入数据 */
         || lsquic_stream_write_avail(stream)
     ;
 }
 
 
+/* 根据对端的流控返回本端剩余可发送量: 取连接和流粒度的最小值 */
 static size_t
 stream_write_avail_no_frames (struct lsquic_stream *stream)
 {
     uint64_t stream_avail, conn_avail;
 
+    /* 流粒度的流控剩余可发送量 */
     stream_avail = stream->max_send_off - stream->tosend_off
                                                 - stream->sm_n_buffered;
 
+    /* 连接粒度的流控剩余可发送量, 与流粒度取小者 */
     if (stream->sm_bflags & SMBF_CONN_LIMITED)
     {
         conn_avail = lsquic_conn_cap_avail(&stream->conn_pub->conn_cap);
@@ -1056,9 +1060,11 @@ stream_write_avail_with_headers (struct lsquic_stream *stream)
 }
 
 
+/* 根据对端的流控(接收窗口)返回本端剩余可发送量 */
 size_t
 lsquic_stream_write_avail (struct lsquic_stream *stream)
 {
+    /* gquic调用stream_write_avail_no_frames() */
     return stream->sm_write_avail(stream);
 }
 
@@ -2131,8 +2137,10 @@ stream_wantwrite (struct lsquic_stream *stream, int new_val)
     if (old_val != new_val)
     {
         if (new_val)
+            /* 设置SMQF_WANT_WRITE标志位并将流加入write_streams队列中 */
             maybe_put_onto_write_q(stream, SMQF_WANT_WRITE);
         else
+            /* 移除SMQF_WANT_WRITE标志位并将流从write_streams队列移除 */
             maybe_remove_from_write_q(stream, SMQF_WANT_WRITE);
     }
     return old_val;
@@ -2171,6 +2179,7 @@ lsquic_stream_wantwrite (lsquic_stream_t *stream, int is_want)
     {
         stream->sm_saved_want_write = is_want;
         if (is_want)
+            /* 将连接加入tickable, 在tick中process_streams_write_events()会回调进行写操作 */
             maybe_conn_to_tickable_if_writeable(stream, 1);
         return stream_wantwrite(stream, is_want);
     }
@@ -2319,6 +2328,7 @@ static void
     if (0 == (stream->stream_flags & STREAM_PUSHING)
                     && SSHS_HBLOCK_SENDING != stream->sm_send_headers_state)
         /* Common case */
+        /* 上层提供的写数据接口, 最终会使用lsquic_stream_write()等接口写入数据 */
         return stream->stream_if->on_write;
     else if (SSHS_HBLOCK_SENDING == stream->sm_send_headers_state)
         return on_write_header_wrapper;
@@ -2333,6 +2343,7 @@ static void
 }
 
 
+/* 循环调用写回调写入数据 */
 static void
 stream_dispatch_write_events_loop (lsquic_stream_t *stream)
 {
@@ -2340,20 +2351,24 @@ stream_dispatch_write_events_loop (lsquic_stream_t *stream)
     void (*on_write) (struct lsquic_stream *, lsquic_stream_ctx_t *);
     struct progress progress;
 
+    /* 用于检查避免死循环, 默认1000次 */
     no_progress_limit = stream->conn_pub->enpub->enp_settings.es_progress_check;
 
     no_progress_count = 0;
     stream->stream_flags |= STREAM_LAST_WRITE_OK;
-    while ((stream->sm_qflags & SMQF_WANT_WRITE)
-           && (stream->stream_flags & STREAM_LAST_WRITE_OK)
+    while ((stream->sm_qflags & SMQF_WANT_WRITE) /* 上层on_write接口中暂停了写 */
+           && (stream->stream_flags & STREAM_LAST_WRITE_OK) /* stream_write_to_packets()中如果暂停写入会清除标志来退出循环 */
            && !(stream->stream_flags & STREAM_ONCLOSE_DONE)
-           && stream_writeable(stream))
+           && stream_writeable(stream)) /* 限制写入量不能超过对端通告的接收窗口 */
     {
         progress = stream_progress(stream);
 
-        on_write = select_on_write(stream);
-        on_write(stream, stream->st_ctx);
+        on_write = select_on_write(stream); /* 返回写数据接口 */
+        on_write(stream, stream->st_ctx); /* 调用接口写数据 */
 
+        /* 用于检查避免死循环: 连续1000次写入回调后如果流状态
+         * 没有任何变化说明可能死循环, 强制退出循环
+         */
         if (no_progress_limit && progress_eq(progress, stream_progress(stream)))
         {
             ++no_progress_count;
@@ -2446,7 +2461,7 @@ lsquic_stream_dispatch_read_events (lsquic_stream_t *stream)
     }
 }
 
-
+/* 回调上层进行写入流数据 */
 void
 lsquic_stream_dispatch_write_events (lsquic_stream_t *stream)
 {
@@ -2472,17 +2487,17 @@ lsquic_stream_dispatch_write_events (lsquic_stream_t *stream)
     if (stream->sm_qflags & SMQF_WANT_FLUSH)
         (void) stream_flush(stream);
 
-    if (stream->sm_bflags & SMBF_RW_ONCE)
+    if (stream->sm_bflags & SMBF_RW_ONCE) /* 配置了一次tick调用只写一次 */
     {
         if ((stream->sm_qflags & SMQF_WANT_WRITE)
             && !(stream->stream_flags & STREAM_ONCLOSE_DONE)
-            && stream_writeable(stream))
+            && stream_writeable(stream)) /* 限制写入量不能超过对端通告的接收窗口 */
         {
-            on_write = select_on_write(stream);
-            on_write(stream, stream->st_ctx);
+            on_write = select_on_write(stream); /* 返回写数据接口 */
+            on_write(stream, stream->st_ctx); /* 调用接口写数据 */
         }
     }
-    else
+    else /* 循环写入数据 */
         stream_dispatch_write_events_loop(stream);
 
     if ((stream->sm_qflags & SMQF_SEND_BLOCKED) &&
@@ -2492,13 +2507,14 @@ lsquic_stream_dispatch_write_events (lsquic_stream_t *stream)
     }
 
     /* Progress means either flags or offsets changed: */
+    /* 为1说明经过写入 流状态改变了, 也就是写成功了 */
     progress = !((stream->sm_qflags & SMQF_WRITE_Q_FLAGS) == q_flags &&
                         stream->tosend_off == tosend_off &&
                             stream->sm_n_buffered == n_buffered);
 
     if (stream->sm_qflags & SMQF_WRITE_Q_FLAGS)
     {
-        if (progress)
+        if (progress) /* 成功后将流移到队列尾部确保调用公平 */
         {   /* Move the stream to the end of the list to ensure fairness. */
             TAILQ_REMOVE(&stream->conn_pub->write_streams, stream,
                                                             next_write_stream);
@@ -2591,7 +2607,7 @@ stream_get_n_allowed (const struct lsquic_stream *stream)
     if (stream->sm_n_allocated)
         return stream->sm_n_allocated;
     else
-        return stream->conn_pub->path->np_pack_size;
+        return stream->conn_pub->path->np_pack_size; /* Mss大小 */
 }
 
 
@@ -3450,6 +3466,7 @@ maybe_close_varsize_hq_frame (struct lsquic_stream *stream)
 }
 
 
+/* thresh参数控制每次至少写入packets数据量, 剩余的部分会先缓存到sm_buf中 */
 static ssize_t
 stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
                          size_t thresh, enum stream_write_options swo)
@@ -3485,15 +3502,15 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
     }
 
     seen_ok = 0;
-    while ((size = fg_ctx.fgc_size(&fg_ctx),
-                            fg_ctx.fgc_thresh
+    while ((size = fg_ctx.fgc_size(&fg_ctx), /* 获取size, 即剩余要写入的数据大小(包括sm_buf里的) */
+                            fg_ctx.fgc_thresh /* 如果有带thresh, 则得超过thresh才能写入packets, 剩余的在循环后会写入sm_buf */
                           ? size >= fg_ctx.fgc_thresh : size > 0)
            || fg_ctx.fgc_fin(&fg_ctx))
     {
         /* iquic中初始化为stream_write_to_packet_std() */
-        switch (stream->sm_write_to_packet(&fg_ctx, size))
+        switch (stream->sm_write_to_packet(&fg_ctx, size)) /* 写入流数据 */
         {
-        case SWTP_OK:
+        case SWTP_OK: /* 写入成功 */
             if (!seen_ok++)
             {
                 maybe_conn_to_tickable_if_writeable(stream, 0);
@@ -3508,7 +3525,7 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
             }
             else
                 break;
-        case SWTP_STOP:
+        case SWTP_STOP: /* 暂停流数据写入 */
             stream->stream_flags &= ~STREAM_LAST_WRITE_OK;
             if (use_framing && seen_ok)
                 maybe_close_varsize_hq_frame(stream);
@@ -3523,12 +3540,15 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
     if (use_framing && seen_ok)
         maybe_close_varsize_hq_frame(stream);
 
+    /* 如果指定了thresh, 上面的while循环在最后如果数据小于thresh时会退出,
+     * 此时将剩余的数据写入sm_buf中
+     */
     if (fg_ctx.fgc_thresh && (swo & SWO_BUFFER))
     {
         assert(size < fg_ctx.fgc_thresh);
         assert(size >= stream->sm_n_buffered);
-        size -= stream->sm_n_buffered;
-        if (size > 0)
+        size -= stream->sm_n_buffered; /* 上面size已经包括了sm_n_buffered的大小, 现在扣掉 */
+        if (size > 0) /* 还有真正剩余大小则写入sm_buf */
         {
             nw = save_to_buffer(stream, reader, size);
             if (nw < 0)
@@ -3554,7 +3574,7 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
     if (stream->conn_pub)
         --stream->conn_pub->wtp_level;
 #endif
-    return fg_ctx.fgc_nread_from_reader;
+    return fg_ctx.fgc_nread_from_reader; /* 返回成功写入的数据量 */
 
   err:
 #if LSQUIC_EXTRA_CHECKS
@@ -3695,6 +3715,7 @@ save_to_buffer (lsquic_stream_t *stream, struct lsquic_reader *reader,
     n_allowed = stream_get_n_allowed(stream);
     assert(stream->sm_n_buffered + len <= n_allowed);
 
+    /* 还未分配sm_buf则分配Mss大小的缓存 */
     if (!stream->sm_buf)
     {
         stream->sm_buf = malloc(n_allowed);
@@ -3709,7 +3730,7 @@ save_to_buffer (lsquic_stream_t *stream, struct lsquic_reader *reader,
 
     n_written = reader->lsqr_read(reader->lsqr_ctx,
                         stream->sm_buf + stream->sm_n_buffered, len);
-    stream->sm_n_buffered += n_written;
+    stream->sm_n_buffered += n_written; /* 增加写入sm_buf的数据量大小 */
     assert(stream->max_send_off >= stream->tosend_off + stream->sm_n_buffered);
     incr_conn_cap(stream, n_written);
     LSQ_DEBUG("buffered %zd bytes; %hu bytes are now in buffer",
@@ -3739,10 +3760,11 @@ stream_write (lsquic_stream_t *stream, struct lsquic_reader *reader,
             if (shf->shf_off >= stream->sm_payload)
                 frames += stream_hq_frame_size(shf);
     total_len = len + frames + stream->sm_n_buffered;
-    thresh = lsquic_stream_flush_threshold(stream, total_len);
-    n_allowed = stream_get_n_allowed(stream);
-    /* 如果数据总长度小于等于当前流的可写入长度和流的刷新阈值,
+    thresh = lsquic_stream_flush_threshold(stream, total_len); /* mss大小减去各种包/帧头大小 */
+    n_allowed = stream_get_n_allowed(stream); /* 为mss大小 */
+    /* 如果数据总长度小于一个mss可携带的数据大小
      * 那么就可以先将数据缓存起来, 原因是为了减少写入数据包的次数
+     * 这个缓存是为了将少量的写整合成一个包的大小
      */
     if (total_len <= n_allowed && total_len < thresh)
     {
@@ -3751,6 +3773,10 @@ stream_write (lsquic_stream_t *stream, struct lsquic_reader *reader,
         nwritten = 0;
         do
         {
+            /* 将数据先保存在sm_buf中
+             * 上层一般写完数据会主动调用lsquic_stream_flush()来将sm_buf的数据发送出去
+             * 否则得等下次写入数据时才会将数据发送出去
+             */
             nw = save_to_buffer(stream, reader, len - nwritten);
             if (nw > 0)
                 nwritten += (size_t) nw;

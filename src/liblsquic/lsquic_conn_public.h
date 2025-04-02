@@ -28,6 +28,7 @@ struct lsquic_conn_public {
                                                         /* 当流需要发送SMQF_SENDING_FLAGS中类型的帧时会被加入该队列 */
                                     read_streams,       /* 上层想读取流数据的流, 由stream_wantread()加入 */
                                     write_streams,      /* Send STREAM frames */
+                                                        /* 上层想写入流数据的流, 由stream_wantwrite()加入 */
                                     service_streams;
     struct lsquic_hash             *all_streams;    /* 保存所有流的哈希表,
                                                      * key为stream id, value为struct lsquic_stream地址

@@ -144,7 +144,10 @@ enum stream_q_flags
 
     /* write_streams: */
 #define SMQF_WRITE_Q_FLAGS (SMQF_WANT_FLUSH|SMQF_WANT_WRITE)
-    SMQF_WANT_WRITE   = 1 << 1,
+    SMQF_WANT_WRITE   = 1 << 1,     /* 上层想写入流数据的流, 该流同时也被加入write_streams队列中,
+                                     * 这样在tick中最终会调用lsquic_stream_dispatch_write_events()函数
+                                     * 来处理写入事件
+                                     */
     SMQF_WANT_FLUSH   = 1 << 2,     /* Flush until sm_flush_to is hit */
 
     /* There are more than one reason that a stream may be put onto
@@ -270,9 +273,11 @@ struct lsquic_stream /* 流结构, 表示一条流 */
                                         next_write_stream, next_service_stream,
                                         next_prio_stream;
 
-    uint64_t                        tosend_off;
+    uint64_t                        tosend_off;     /* 流当前写入的偏移 */
     uint64_t                        sm_payload;     /* Not counting HQ frames */
-    uint64_t                        max_send_off;   /* 接收到的最大流数据量, 即QUIC_FRAME_MAX_STREAM_DATA帧携带的值,
+    uint64_t                        max_send_off;   /* 接收到的最大流数据量, 
+                                                     * 即iquic:QUIC_FRAME_MAX_STREAM_DATA帧 或
+                                                     *   gquic:QUIC_FRAME_WINDOW_UPDATE帧 中携带的值
                                                      * 用于流控, 发送时不能操作该值
                                                      */
     uint64_t                        sm_last_recv_off;
@@ -324,7 +329,7 @@ struct lsquic_stream /* 流结构, 表示一条流 */
                                    *push_req;
     union hblock_ctx               *sm_hblock_ctx;
 
-    unsigned char                  *sm_buf;
+    unsigned char                  *sm_buf;     /* Mss大小的写缓存, 由save_to_buffer()写入 */
     void                           *sm_onnew_arg;
 
     unsigned char                  *sm_header_block;
@@ -390,12 +395,15 @@ struct lsquic_stream /* 流结构, 表示一条流 */
                                     sm_hblock_off;
 
     unsigned short                  sm_n_buffered;  /* Amount of data in sm_buf */
+                                                    /* sm_buf中缓存的数据量 */
     unsigned short                  sm_n_allocated;  /* Size of sm_buf */
+                                                     /* sm_buf分配的大小, 为一个mss的大小 */
 
     /* If SMBF_HTTP_PRIO is set, the priority is used to represent the
      * Extensible Priority urgency, which is in the range [0, 7].
      */
     unsigned char                   sm_priority;  /* 0: high; 255: low */
+                                                  /* 流的优先级, 越小优先级越高 */
     unsigned char                   sm_enc_level;
     enum {
         SSHS_BEGIN,         /* Nothing has happened yet */
@@ -428,7 +436,7 @@ enum stream_ctor_flags
                                    * and hash-based to data input for optimal
                                    * performance.
                                    */
-    SCF_DISP_RW_ONCE  = SMBF_RW_ONCE,  /* engine开启了es_rw_once参数 */
+    SCF_DISP_RW_ONCE  = SMBF_RW_ONCE,  /* engine开启了es_rw_once参数(默认关闭) */
     SCF_CRITICAL      = SMBF_CRITICAL, /* This is a critical stream */
     SCF_IETF          = SMBF_IETF,
     SCF_HTTP          = SMBF_USE_HEADERS,

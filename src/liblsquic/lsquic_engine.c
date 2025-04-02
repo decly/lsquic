@@ -2896,7 +2896,7 @@ send_packets_out (struct lsquic_engine *engine,
             batch->outs   [n].conn_ctx = conn->cn_conn_ctx;
             batch->conns  [n]          = conn;
         }
-        *packet = packet_out;
+        *packet = packet_out; /* 加入要发送的数组 */
         ++packet;
         ++iov;
         if ((conn->cn_flags & LSCONN_IETF)

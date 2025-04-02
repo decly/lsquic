@@ -14,7 +14,10 @@ struct pacer
 
     /* All tick times are in microseconds */
 
-    unsigned        pa_clock_granularity;   /* 调度的粒度, 单位微妙, 默认1000微妙 */
+    unsigned        pa_clock_granularity;   /* 控制pacer调度的精度, 单位微妙, 默认1000微妙(1ms)
+                                             * 也就是说pacer允许同时发送1ms内的数据包
+                                             * 详见lsquic_pacer_can_schedule()
+                                             */
 
     unsigned        pa_burst_tokens;    /* 不参与pacing的令牌个数, 为10个
 					                     * 即连接一开始或idle restart后前10个包直接发送

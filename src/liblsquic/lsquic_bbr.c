@@ -358,6 +358,9 @@ lsquic_bbr_ack (void *cong_ctl, struct lsquic_packet_out *packet_out,
 }
 
 
+/* 参数app_limited为当前发送时app-limited受限, 即ctl->sc_flags & SC_APP_LIMITED,
+ * 在lsquic_send_ctl_maybe_app_limited()中判断设置
+ */
 static void
 lsquic_bbr_sent (void *cong_ctl, struct lsquic_packet_out *packet_out,
                                         uint64_t in_flight, int app_limited)

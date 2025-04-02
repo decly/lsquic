@@ -32,7 +32,8 @@ struct lsquic_conn_cap {
                                  * to be sent on this connection.
                                  */
                                 /* 连接级别的最大数据量, 表示流控中可发送的最大数据量
-                                 * 从对端发送的最大数据量(QUIC_FRAME_MAX_DATA)帧得到
+                                 * 从对端发送的最大数据量(iquic:QUIC_FRAME_MAX_DATA / gquic:QUIC_FRAME_WINDOW_UPDATE)帧得到
+                                 * 连接剩余可发送量为 cc_max - cc_sent, 详见lsquic_conn_cap_avail()
                                  */
     uint64_t cc_blocked;        /* Last blocked offset used */
 };
@@ -44,6 +45,7 @@ struct lsquic_conn_cap {
 } while (0)
 
 
+/* 连接粒度的流控剩余可发送量 */
 #define lsquic_conn_cap_avail(cap) (                                \
     (assert((cap)->cc_max >= (cap)->cc_sent)),                      \
         (cap)->cc_max - (cap)->cc_sent)
