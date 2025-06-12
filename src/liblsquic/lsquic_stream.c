@@ -2822,15 +2822,16 @@ frame_hq_gen_size (void *ctx)
 }
 
 
+/* 判断是否要写FIN标志了 */
 static int
 frame_std_gen_fin (void *ctx)
 {
     struct frame_gen_ctx *fg_ctx = ctx;
     return !(fg_ctx->fgc_stream->sm_bflags & SMBF_CRYPTO)
-        && (fg_ctx->fgc_stream->stream_flags & STREAM_U_WRITE_DONE)
+        && (fg_ctx->fgc_stream->stream_flags & STREAM_U_WRITE_DONE) /* 上层写完数据了 */
         && 0 == fg_ctx->fgc_stream->sm_n_buffered
         /* Do not use frame_std_gen_size() as it may chop the real size: */
-        && 0 == fg_ctx->fgc_reader->lsqr_size(fg_ctx->fgc_reader->lsqr_ctx);
+        && 0 == fg_ctx->fgc_reader->lsqr_size(fg_ctx->fgc_reader->lsqr_ctx); /* 数据也都发完了 */
 }
 
 
@@ -2882,6 +2883,7 @@ frame_std_gen_read (void *ctx, void *begin_buf, size_t len, int *fin)
     lsquic_stream_t *const stream = fg_ctx->fgc_stream;
     size_t n_written, available, n_to_write;
 
+    /* 存在sm_buf则先写 */
     if (stream->sm_n_buffered > 0)
     {
         if (len <= stream->sm_n_buffered)
@@ -2907,10 +2909,12 @@ frame_std_gen_read (void *ctx, void *begin_buf, size_t len, int *fin)
         maybe_resize_threshold(fg_ctx);
     }
 
+    /* 流控剩余量 */
     available = lsquic_stream_write_avail(fg_ctx->fgc_stream);
     n_to_write = end - p;
     if (n_to_write > available)
         n_to_write = available;
+    /* 这里真正的写数据 */
     n_written = fg_ctx->fgc_reader->lsqr_read(fg_ctx->fgc_reader->lsqr_ctx, p,
                                               n_to_write);
     p += n_written;
@@ -2918,7 +2922,7 @@ frame_std_gen_read (void *ctx, void *begin_buf, size_t len, int *fin)
     *fin = fg_ctx->fgc_fin(fg_ctx);
     incr_sm_payload(stream, p - (const unsigned char *) begin_buf);
     incr_conn_cap(stream, n_written);
-    return p - (const unsigned char *) begin_buf;
+    return p - (const unsigned char *) begin_buf; /* 返回写入大小 */
 }
 
 
@@ -3198,12 +3202,16 @@ write_stream_frame (struct frame_gen_ctx *fg_ctx, const size_t size,
     const uint64_t begin_off = stream->tosend_off;
 #endif
     off = packet_out->po_data_sz;
+    /* 将流帧写入po_data中, iquic调用ietf_v1_gen_stream_frame()
+     * 返回的len为生成流帧的长度
+     */
     len = pf->pf_gen_stream_frame(
                 packet_out->po_data + packet_out->po_data_sz,
                 lsquic_packet_out_avail(packet_out), stream->id,
                 stream->tosend_off,
+                /* fgc_fin即frame_std_gen_fin() */
                 fg_ctx->fgc_fin(fg_ctx), size, fg_ctx->fgc_read, fg_ctx);
-    if (len <= 0)
+    if (len <= 0) /* 无法写入了(比如写满了流控窗口) */
         return len;
 
 #if LSQUIC_CONN_STATS
@@ -3213,10 +3221,11 @@ write_stream_frame (struct frame_gen_ctx *fg_ctx, const size_t size,
 #endif
     EV_LOG_GENERATED_STREAM_FRAME(LSQUIC_LOG_CONN_ID, pf,
                             packet_out->po_data + packet_out->po_data_sz, len);
-    lsquic_send_ctl_incr_pack_sz(send_ctl, packet_out, len);
+    lsquic_send_ctl_incr_pack_sz(send_ctl, packet_out, len); /* 增加包的长度 */
     packet_out->po_frame_types |= 1 << QUIC_FRAME_STREAM;
-    if (0 == lsquic_packet_out_avail(packet_out))
+    if (0 == lsquic_packet_out_avail(packet_out)) /* 包写满了 */
         packet_out->po_flags |= PO_STREAM_END;
+    /* 将流帧信息保存到包(packet_out->po_frecs)中 */
     s = lsquic_packet_out_add_stream(packet_out, stream->conn_pub->mm,
                                      stream, QUIC_FRAME_STREAM, off, len);
     if (s != 0)
@@ -3322,7 +3331,7 @@ stream_write_to_packet_std (struct frame_gen_ctx *fg_ctx, const size_t size)
         len = write_stream_frame(fg_ctx, size, packet_out); /* 将流数据帧写入数据包中 */
         if (len > 0)
             return SWTP_OK;
-        if (len == 0)
+        if (len == 0) /* 无法继续写入了 */
             return SWTP_STOP;
         /* 如果需要的空间比初始计算的空间还要大，则需要重新获取数据包 */
         if (-len > (int) need_at_least)
@@ -3525,7 +3534,7 @@ stream_write_to_packets (lsquic_stream_t *stream, struct lsquic_reader *reader,
             }
             else
                 break;
-        case SWTP_STOP: /* 暂停流数据写入 */
+        case SWTP_STOP: /* 暂停流数据写入, 比如send_ctl的bufferd限制 */
             stream->stream_flags &= ~STREAM_LAST_WRITE_OK;
             if (use_framing && seen_ok)
                 maybe_close_varsize_hq_frame(stream);

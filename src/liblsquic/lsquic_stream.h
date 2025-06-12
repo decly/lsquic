@@ -275,6 +275,7 @@ struct lsquic_stream /* 流结构, 表示一条流 */
 
     uint64_t                        tosend_off;     /* 流当前写入的偏移 */
     uint64_t                        sm_payload;     /* Not counting HQ frames */
+                                                    /* 流当前累积写入的应用数据量 */
     uint64_t                        max_send_off;   /* 接收到的最大流数据量, 
                                                      * 即iquic:QUIC_FRAME_MAX_STREAM_DATA帧 或
                                                      *   gquic:QUIC_FRAME_WINDOW_UPDATE帧 中携带的值

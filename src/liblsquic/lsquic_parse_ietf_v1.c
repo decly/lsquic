@@ -333,6 +333,14 @@ ietf_v1_packout_size (const struct lsquic_conn *lconn,
 }
 
 
+/* 写入流帧
+ * @buf: 要写入流帧的buffer
+ * @buf_len: buf的大小
+ * @stream_id: 流ID
+ * @offset: 流帧的OFF字段, 即指定此STREAM帧中数据在流中的字节偏移量
+ * @fin: 是否为FIN
+ * @size: 上层待写入的流数据大小
+ */
 static int
 ietf_v1_gen_stream_frame (unsigned char *buf, size_t buf_len,
         lsquic_stream_id_t stream_id, uint64_t offset, int fin, size_t size,
@@ -360,11 +368,11 @@ ietf_v1_gen_stream_frame (unsigned char *buf, size_t buf_len,
      */
 
     sbits = vint_val2bits(stream_id);
-    slen = 1 << sbits;
+    slen = 1 << sbits; /* streamID的长度, 字节 */
     if (offset)
     {
         obits = vint_val2bits(offset);
-        olen = 1 << obits;
+        olen = 1 << obits; /* offset的长度, 字节 */
     }
     else
         olen = 0;
@@ -374,43 +382,47 @@ ietf_v1_gen_stream_frame (unsigned char *buf, size_t buf_len,
         unsigned n_avail;
         size_t nr;
 
-        n_avail = buf_len - (p + slen + olen - buf);
+        n_avail = buf_len - (p + slen + olen - buf); /* 本packet还能写入的空间 */
 
         /* If we cannot fill remaining buffer, we need to include data
          * length.
          */
-        if (size < n_avail)
+        if (size < n_avail) /* 流数据没写满packet, 需带length字段 */
         {
             dbits = vint_val2bits(size);
-            dlen = 1 << dbits;
+            dlen = 1 << dbits; /* length字段的长度, 字节 */
             n_avail -= dlen;
             if (size > n_avail)
-                size = n_avail;
+                size = n_avail; /* 本packet要写入的流数据大小 */
         }
-        else
+        else /* 流数据能写满packet, 不用带length字段 */
         {
             dlen = 0;
-            size = n_avail;
+            size = n_avail; /* 本packet要写入的流数据大小 */
         }
 
         CHECK_STREAM_SPACE(1 + olen + slen + dlen +
             + 1 /* We need to write at least 1 byte */, buf, buf + buf_len);
 
-        vint_write(p, stream_id, sbits, slen);
+        vint_write(p, stream_id, sbits, slen); /* 写streamID字段 */
         p += slen;
 
         if (olen)
-            vint_write(p, offset, obits, olen);
+            vint_write(p, offset, obits, olen); /* 写offset字段 */
         p += olen;
 
         /* Read as much as we can */
+        /* 这里把数据写入流帧, gsf_read比如frame_std_gen_read()
+         * size为本packet要写入的流数据大小, 数据都写完可能将fin置为1
+         * 返回nr为实际写入大小
+         */
         nr = gsf_read(stream, p + dlen, size, &fin);
         if (nr == 0)
             return 0;
         assert(nr <= size);
 
         if (dlen)
-            vint_write(p, nr, dbits, dlen);
+            vint_write(p, nr, dbits, dlen); /* 写length字段(值为nr) */
 
         p += dlen + nr;
     }
@@ -427,12 +439,13 @@ ietf_v1_gen_stream_frame (unsigned char *buf, size_t buf_len,
             *p++ = 0;
     }
 
+    /* 写入流帧的Type字段 */
     buf[0] = 0x08
            | (!!olen << 2)
            | (!!dlen << 1)
            | (!!fin  << 0)
            ;
-    return p - buf;
+    return p - buf; /* 返回写入流帧的长度 */
 }
 
 

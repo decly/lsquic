@@ -80,9 +80,9 @@ lsquic_pacer_packet_scheduled (struct pacer *pacer, unsigned n_in_flight,
      * tx_time为 send_ctl_transfer_time()
      */
     delay = tx_time(tx_ctx); 
-    if (pacer->pa_flags & PA_LAST_SCHED_DELAYED)
+    if (pacer->pa_flags & PA_LAST_SCHED_DELAYED) /* 最后一次发送时收到pacer限制无法发送 */
     {
-        pacer->pa_next_sched += delay;
+        pacer->pa_next_sched += delay; /* 加上本包发送时间 */
         app_limited = pacer->pa_last_delayed != 0
             && pacer->pa_last_delayed + delay <= sched_time;
         making_up = pacer->pa_next_sched <= sched_time;

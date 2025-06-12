@@ -165,6 +165,7 @@ typedef struct lsquic_packet_out
                                          */
                                         /* 包中无需重传的字节数, 比如ACK帧 */
     unsigned short     po_n_alloc;      /* Total number of bytes allocated in po_data */
+                                        /* po_data申请的内存大小 */
     unsigned short     po_token_len;    /* 要发送token的大小(token保存在po_token中) */
     enum header_type   po_header_type:8;
     unsigned char      po_dcid_len;     /* If PO_ENCRYPTED is set */
@@ -232,6 +233,7 @@ typedef struct lsquic_packet_out
  * in po_flags.  The cost is a bit of complexity.  This will save us four bytes.
  */
 
+/* 返回packet剩余可写空间 */
 #define lsquic_packet_out_avail(p) ((unsigned short) \
                                         ((p)->po_n_alloc - (p)->po_data_sz))
 

@@ -1664,6 +1664,7 @@ send_ctl_next_lost (lsquic_send_ctl_t *ctl)
              */
             if (0 == split_lost_packet(ctl, lost_packet))
             {
+                /* 分片成功, 去重传 */
                 lost_packet = TAILQ_FIRST(&ctl->sc_lost_packets);
                 goto pop_lost_packet;
             }
@@ -3509,17 +3510,19 @@ split_lost_packet (struct lsquic_send_ctl *ctl,
     lsquic_packet_resize_init(&prctx, ctl->sc_enpub, lconn, &one_ctx,
                                                         &resize_one_funcs);
     count = 0;
+    /* 对packet按照当前的MTU分片, 每次返回产生一个new packet */
     while (new = lsquic_packet_resize_next(&prctx), new != NULL)
     {
         ++count;
         TAILQ_INSERT_BEFORE(packet_out, new, po_next);
         new->po_flags |= PO_LOST;
     }
-    if (lsquic_packet_resize_is_error(&prctx))
+    if (lsquic_packet_resize_is_error(&prctx)) /* 分片出错了 */
     {
         LSQ_WARN("error resizing lost packet #%"PRIu64, packet_out->po_packno);
         return -1;
     }
+    /* 因为MTU变小了, 所以一个原始packet肯定会分出不止一个new packet */
     if (!(count > 1 && one_ctx.fetched == 1 && one_ctx.discarded == 1))
     {
         /* A bit of insurance, this being new code */
@@ -3531,6 +3534,7 @@ split_lost_packet (struct lsquic_send_ctl *ctl,
     LSQ_DEBUG("added %u packets to the lost queue", count);
 
     LSQ_DEBUG("drop oversized lost packet #%"PRIu64, packet_out->po_packno);
+    /* 删除原始packet */
     TAILQ_REMOVE(&ctl->sc_lost_packets, packet_out, po_next);
     packet_out->po_flags &= ~PO_LOST;
     send_ctl_destroy_chain(ctl, packet_out, NULL);

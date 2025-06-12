@@ -48,13 +48,14 @@ packet_resize_next_frec (struct packet_resize_ctx *prctx)
     const struct frame_rec *frec;
 
     assert(!prctx->prc_cur_frec);
-    if (prctx->prc_cur_packet)
+    if (prctx->prc_cur_packet) /* 有正在处理的包, 继续找包中下一个帧 */
     {
         LSQ_DEBUG("get next frec from current packet %"PRIu64,
                                             prctx->prc_cur_packet->po_packno);
-        frec = lsquic_pofi_next(&prctx->prc_pofi);
+        frec = lsquic_pofi_next(&prctx->prc_pofi); /* 下一个帧 */
         if (frec)
             return frec;
+        /* 处理完当前原始包中的所有帧了 */
         LSQ_DEBUG("discard packet %"PRIu64, prctx->prc_cur_packet->po_packno);
         prctx->prc_pri->pri_discard_packet(prctx->prc_data,
                                                         prctx->prc_cur_packet);
@@ -63,14 +64,16 @@ packet_resize_next_frec (struct packet_resize_ctx *prctx)
 
     do
     {
+        /* 获取一个待分片的原始包 */
         prctx->prc_cur_packet = prctx->prc_pri->pri_next_packet(prctx->prc_data);
         if (!prctx->prc_cur_packet)
         {
             LSQ_DEBUG("out of input packets");
             return NULL;
         }
+        /* 找到包中的帧首个帧 */
         frec = lsquic_pofi_first(&prctx->prc_pofi, prctx->prc_cur_packet);
-        if (frec == NULL)
+        if (frec == NULL) /* 包中没有帧 */
         {
             LSQ_DEBUG("discard, no good frec from current packet %"PRIu64,
                                         prctx->prc_cur_packet->po_packno);
@@ -84,6 +87,7 @@ packet_resize_next_frec (struct packet_resize_ctx *prctx)
 }
 
 
+/* 返回下一个帧 */
 static const struct frame_rec *
 packet_resize_get_frec (struct packet_resize_ctx *prctx)
 {
@@ -123,13 +127,14 @@ lsquic_packet_resize_next (struct packet_resize_ctx *prctx)
     const unsigned char *data_in;
     struct lsquic_packet_out *new;
     struct stream_frame stream_frame;
-    const struct frame_rec *frec;
+    const struct frame_rec *frec; /* 要处理的原始packet中的帧 */
     int s, w, fin, parsed_len;
     size_t nbytes;
 
     if (frec = packet_resize_get_frec(prctx), frec == NULL)
         return NULL;
 
+    /* 分配一个新的packet */
     new = prctx->prc_pri->pri_new_packet(prctx->prc_data);
     if (!new)
     {
@@ -140,9 +145,11 @@ lsquic_packet_resize_next (struct packet_resize_ctx *prctx)
   proc_frec:
     if ((1 << frec->fe_frame_type) & (QUIC_FTBIT_STREAM|QUIC_FTBIT_CRYPTO))
     {
+        /* 解析原始流帧保存到prc_data_frame中 */
         if (prctx->prc_flags & PRC_NEW_FREC)
         {
-            data_in = prctx->prc_cur_packet->po_data + frec->fe_off;
+            data_in = prctx->prc_cur_packet->po_data + frec->fe_off; /* 流帧起始 */
+            /* 解析原始流帧frec, 信息保存到stream_frame结构中 */
             parsed_len = (&prctx->prc_conn->cn_pf->pf_parse_stream_frame)
                 [frec->fe_frame_type == QUIC_FRAME_CRYPTO]
                 (data_in, frec->fe_len, &stream_frame);
@@ -170,7 +177,9 @@ lsquic_packet_resize_next (struct packet_resize_ctx *prctx)
         }
         fin = prctx->prc_data_frame.df_fin
             && prctx->prc_data_frame.df_read_off == prctx->prc_data_frame.df_size;
+        /* 原始帧的剩余要拷贝的数据大小 */
         nbytes = prctx->prc_data_frame.df_size - prctx->prc_data_frame.df_read_off;
+        /* 返回w为写入到new packet中流帧数据大小 */
         w = (&prctx->prc_conn->cn_pf->pf_gen_stream_frame)
                 [frec->fe_frame_type == QUIC_FRAME_CRYPTO](
                 new->po_data + new->po_data_sz, lsquic_packet_out_avail(new),
@@ -197,30 +206,35 @@ lsquic_packet_resize_next (struct packet_resize_ctx *prctx)
         new->po_frame_types |= 1 << frec->fe_frame_type;
         if (0 == lsquic_packet_out_avail(new))
             new->po_flags |= PO_STREAM_END;
+        /* 这个流帧都写到new packet中了 */
         if (prctx->prc_data_frame.df_size == prctx->prc_data_frame.df_read_off)
         {
             LSQ_DEBUG("finished using %s frame record",
                                         frame_type_2_str[frec->fe_frame_type]);
             --frec->fe_stream->n_unacked;
             frec = prctx->prc_cur_frec = NULL;
+            /* new packet还有空间, 继续处理下一个原始帧 */
             if (lsquic_packet_out_avail(new) > 0)
                 if (frec = packet_resize_get_frec(prctx), frec != NULL)
                     goto proc_frec;
         }
+        /* 原始帧还没写完的部分, 等下次调用本函数重新申请new packet */
     }
     else if (prctx->prc_cur_frec->fe_len <= lsquic_packet_out_avail(new))
     {
-        if ((1 << frec->fe_frame_type) & BQUIC_FRAME_REGEN_MASK)
+        if ((1 << frec->fe_frame_type) & BQUIC_FRAME_REGEN_MASK) /* 非重传帧 */
         {
+            /* 如果new packet中都是非重传帧, 那么可以合并 */
             if (new->po_regen_sz == new->po_data_sz)
                 new->po_regen_sz += frec->fe_len;
-            else
+            else /* new packet存在重传帧, 则需要分开不同的packet */
             {
                 LSQ_DEBUG("got non-contiguous regen frame %s, packet done",
                                         frame_type_2_str[frec->fe_frame_type]);
-                goto done;
+                goto done; /* 先返回new packet, 本非重传帧等下次进入函数重新分配packet */
             }
         }
+        /* 下面就是把帧拷贝到new packet中 */
         memcpy(new->po_data + new->po_data_sz,
             prctx->prc_cur_packet->po_data + frec->fe_off, frec->fe_len);
         if (frec->fe_frame_type == QUIC_FRAME_RST_STREAM)
@@ -244,6 +258,7 @@ lsquic_packet_resize_next (struct packet_resize_ctx *prctx)
         if (frec->fe_frame_type == QUIC_FRAME_RST_STREAM)
             --frec->fe_stream->n_unacked;
         frec = prctx->prc_cur_frec = NULL;
+        /* new packet还有空间, 继续处理下一个原始帧 */
         if (lsquic_packet_out_avail(new) > 0)
             if (frec = packet_resize_get_frec(prctx), frec != NULL)
                 goto proc_frec;

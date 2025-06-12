@@ -29,13 +29,13 @@ struct packet_resize_ctx
     void                            *prc_data;      /* First arg to prc_pri */
     const struct packet_resize_if   *prc_pri;
     struct lsquic_engine_public     *prc_enpub;
-    const struct frame_rec          *prc_cur_frec;
-    struct lsquic_packet_out        *prc_cur_packet;
-    struct data_frame                prc_data_frame;
+    const struct frame_rec          *prc_cur_frec;      /* 当前正在处理的原始帧, 一个帧处理完后会置NULL */
+    struct lsquic_packet_out        *prc_cur_packet;    /* 当前正在处理的packet */
+    struct data_frame                prc_data_frame;    /* 保存当前正在处理的原始帧(prc_cur_frec)信息 */
     struct packet_out_frec_iter      prc_pofi;
     enum {
-        PRC_ERROR       = 1 << 0,
-        PRC_NEW_FREC    = 1 << 1,
+        PRC_ERROR       = 1 << 0,                       /* 分包出现错误了 */
+        PRC_NEW_FREC    = 1 << 1,                       /* 表示prc_cur_frec对应的原始帧还未处理(prc_data_frame无效) */
     }                                prc_flags;
 };
 
