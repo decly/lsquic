@@ -87,15 +87,23 @@ struct network_path
     unsigned char   np_peer_addr[sizeof(struct sockaddr_in6)]; /* 对端地址 */
     void           *np_peer_ctx;
     lsquic_cid_t    np_dcid;        /* 保存对端的cid */
-    unsigned short  np_pack_size;   /* mss大小
-                                     * v4默认IQUIC_MAX_IPv4_PACKET_SZ
-                                     * v6默认IQUIC_MAX_IPv6_PACKET_SZ
+    unsigned short  np_pack_size;   /* MTU大小, 包括QUIC首部, 分配新的packet就是按照该大小分配的
+                                     * iquic刚建立连接时(之后会probe mtu扩大: 定时器定期采用PING帧+PADDING帧进行MTU探测):
+                                     *   v4默认IQUIC_MAX_IPv4_PACKET_SZ
+                                     *   v6默认IQUIC_MAX_IPv6_PACKET_SZ
+                                     * gquic:
+                                     *   v4默认GQUIC_MAX_IPv4_PACKET_SZ
+                                     *   v6默认GQUIC_MAX_IPv6_PACKET_SZ
                                      */
     unsigned char   np_path_id;
 };
 
 #define NP_LOCAL_SA(path_) (&(path_)->np_local_addr_u.sockaddr)
 #define NP_PEER_SA(path_) ((struct sockaddr *) (path_)->np_peer_addr)
+/* 根据路径本端地址判断是否为ipv6
+ * 但如果对端是v4-mapped地址则不准确, 还是会判断为v6,
+ * 应该根据NP_LOCAL_SA地址的是否为v4-mapped地址来判断才准确
+ */
 #define NP_IS_IPv6(path_) (AF_INET6 == NP_LOCAL_SA(path_)->sa_family)
 
 struct ack_state

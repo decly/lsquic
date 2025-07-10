@@ -115,6 +115,10 @@ enum ifull_conn_flags
     IFC_ACK_HAD_MISS  = 1 << 2,         /* ACK丢了? */
 #define IFC_BIT_ERROR 3
     IFC_ERROR         = 1 << IFC_BIT_ERROR,
+                                        /* 连接出错了, 要关闭连接
+                                         * 设置后会在ietf_full_conn_ci_tick->CLOSE_IF_NECESSARY->immediate_close
+                                         * 中关闭连接
+                                         */
     IFC_TIMED_OUT     = 1 << 4, /* 表示连接空闲时间超时了 */
     IFC_ABORTED       = 1 << 5,
     IFC_HSK_FAILED    = 1 << 6,
@@ -157,7 +161,7 @@ enum more_flags
 {
     MF_VALIDATE_PATH    = 1 << 0,
     MF_NOPROG_TIMEOUT   = 1 << 1,   /* 表示设置了连接空闲断开时间(es_noprogress_timeout参数) */
-    MF_CHECK_MTU_PROBE  = 1 << 2,
+    MF_CHECK_MTU_PROBE  = 1 << 2,   /* 置位表示现在需要发送MTU探测包 */
     MF_IGNORE_MISSING   = 1 << 3,
     MF_CONN_CLOSE_PACK  = 1 << 4,   /* CONNECTION_CLOSE has been packetized */
     MF_SEND_WRONG_COUNTS= 1 << 5,   /* Send wrong ECN counts to peer */
@@ -305,18 +309,19 @@ struct conn_err
 };
 
 
-struct dplpmtud_state
+struct dplpmtud_state   /* 动态MTU探测 */
 {
-    lsquic_packno_t     ds_probe_packno;
+    lsquic_packno_t     ds_probe_packno;    /* MTU探测包的包号 */
 #ifndef NDEBUG
-    lsquic_time_t       ds_probe_sent;
+    lsquic_time_t       ds_probe_sent;      /* 发送MTU探测包的时间 */
 #endif
     enum {
-        DS_PROBE_SENT   = 1 << 0,
+        DS_PROBE_SENT   = 1 << 0,           /* 表示发送了MTU探测包并且还未被确认 */
     }                   ds_flags;
-    unsigned short      ds_probed_size,
+    unsigned short      ds_probed_size,     /* 发送MTU探测包的大小 */
                         ds_failed_size; /* If non-zero, defines ceiling */
-    unsigned char       ds_probe_count;
+                                            /* 记录探测失败的MTU大小 */
+    unsigned char       ds_probe_count;     /* 连续发送MTU探测包未被确认的次数 */
 };
 
 
@@ -347,7 +352,7 @@ struct conn_path
     unsigned char               cop_n_chals;
     unsigned char               cop_cce_idx;
     unsigned char               cop_spin_bit;   /* 自旋值, 发包时设置该值到短包头中的自旋比特位 */
-    struct dplpmtud_state       cop_dplpmtud;
+    struct dplpmtud_state       cop_dplpmtud;   /* 用于PMTUD发送动态MTU探测 */
 };
 
 
@@ -513,10 +518,14 @@ struct ietf_full_conn
 #endif
     unsigned                    ifc_max_ack_freq_seqno; /* Incoming */
     unsigned short              ifc_max_udp_payload;    /* Cached TP */
+                                                        /* 对端配置(transport_params)的最大MTU大小
+                                                         * 没有配置默认为TP_DEF_MAX_UDP_PAYLOAD_SIZE
+                                                         */
     lsquic_time_t               ifc_last_live_update;
     struct conn_path            ifc_paths[N_PATHS];     /* 记录连接的所有路径地址,
                                                          * 在握手成功从mini conn转为full conn时,
                                                          * ifc_paths[0]赋值为ietf_mini_conn->imc_path
+                                                         * 当前使用的路径在ifc_cur_path_id索引处(可以使用CUR_CPATH宏获取)
                                                          */
     union {
         struct {
@@ -559,6 +568,7 @@ struct ietf_full_conn
                                              */
 };
 
+/* 根据ifc_cur_path_id获取当前路径 */
 #define CUR_CPATH(conn_) (&(conn_)->ifc_paths[(conn_)->ifc_cur_path_id])
 #define CUR_NPATH(conn_) (&(CUR_CPATH(conn_)->cop_path))
 #define CUR_DCID(conn_) (&(CUR_NPATH(conn_)->np_dcid))
@@ -815,6 +825,10 @@ blocked_ka_alarm_expired (enum alarm_id al_id, void *ctx,
 }
 
 
+/* MTU探测定时器函数
+ * 重新设置MF_CHECK_MTU_PROBE标志位, 在ietf_full_conn_ci_tick()中
+ * 会调用check_or_schedule_mtu_probe()发送MTU探测
+ */
 static void
 mtu_probe_alarm_expired (enum alarm_id al_id, void *ctx,
                                     lsquic_time_t expiry, lsquic_time_t now)
@@ -3709,6 +3723,7 @@ apply_trans_params (struct ietf_full_conn *conn,
 
     conn->ifc_pub.max_peer_ack_usec = params->tp_max_ack_delay * 1000;
 
+    /* 对端携带最大MTU, 否则默认为TP_DEF_MAX_UDP_PAYLOAD_SIZE */
     if ((params->tp_set & (1 << TPI_MAX_UDP_PAYLOAD_SIZE))
             /* Second check is so that we don't truncate a large value when
              * storing it in unsigned short.
@@ -3719,6 +3734,7 @@ apply_trans_params (struct ietf_full_conn *conn,
     else
         conn->ifc_max_udp_payload = TP_DEF_MAX_UDP_PAYLOAD_SIZE;
 
+    /* MTU不能超过最大MTU */
     if (conn->ifc_max_udp_payload < CUR_NPATH(conn)->np_pack_size)
     {
         CUR_NPATH(conn)->np_pack_size = conn->ifc_max_udp_payload;
@@ -3928,6 +3944,7 @@ handshake_ok (struct lsquic_conn *lconn)
         if (0 != init_http(conn))
             return -1;
 
+    /* 开启动态MTU探测(默认开启) */
     if (conn->ifc_settings->es_dplpmtud)
         conn->ifc_mflags |= MF_CHECK_MTU_PROBE;
 
@@ -8070,6 +8087,7 @@ ietf_full_conn_ci_packet_too_large (struct lsquic_conn *lconn,
     assert(packet_out->po_lflags & POL_HEADER_PROT);
 #endif
 
+    /* MTU探测包超过MTU无法发送了, 通知PMTUD */
     if (packet_out->po_flags & PO_MTU_PROBE)
     {
         LSQ_DEBUG("%zu-byte MTU probe in packet %"PRIu64" is too large",
@@ -8079,6 +8097,7 @@ ietf_full_conn_ci_packet_too_large (struct lsquic_conn *lconn,
         mtu_probe_too_large(conn, packet_out);
     }
     else
+        /* 非MTU探测包超过MTU无法发送, 直接断开连接 */
         ABORT_WARN("non-MTU probe %zu-byte packet %"PRIu64" is too large",
             lsquic_packet_out_sent_sz(&conn->ifc_conn, packet_out),
             packet_out->po_packno);
@@ -8223,6 +8242,7 @@ maybe_set_noprogress_alarm (struct ietf_full_conn *conn, lsquic_time_t now)
 }
 
 
+/* 检查并发送MTU探测包 */
 static void
 check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
 {
@@ -8232,17 +8252,20 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
     unsigned short saved_packet_sz, avail, mtu_ceiling, net_header_sz, probe_sz;
     int sz;
 
+    /* 之前发送了MTU探测包但没被确认
+     * 连续发送MTU探测包3次都丢了, 也就是探测的MTU太大了
+     */
     if (ds->ds_flags & DS_PROBE_SENT)
     {
         assert(ds->ds_probe_sent + conn->ifc_enpub->enp_mtu_probe_timer < now);
         LSQ_DEBUG("MTU probe of %hu bytes lost", ds->ds_probed_size);
         ds->ds_flags &= ~DS_PROBE_SENT;
         conn->ifc_mflags |= MF_CHECK_MTU_PROBE;
-        if (ds->ds_probe_count >= 3)
+        if (ds->ds_probe_count >= 3) /* 探测3次了都没收到说明MTU太大丢了 */
         {
             LSQ_DEBUG("MTU probe of %hu bytes lost after %hhu tries",
                 ds->ds_probed_size, ds->ds_probe_count);
-            ds->ds_failed_size = ds->ds_probed_size;
+            ds->ds_failed_size = ds->ds_probed_size; /* 记录探测失败的大小 */
             ds->ds_probe_count = 0;
         }
     }
@@ -8250,27 +8273,36 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
     assert(0 == ds->ds_probe_sent
         || ds->ds_probe_sent + conn->ifc_enpub->enp_mtu_probe_timer < now);
 
+    /* 以下情况不能发送MTU PROBE */
     if (!(conn->ifc_conn.cn_flags & LSCONN_HANDSHAKE_DONE)
         || (conn->ifc_flags & IFC_CLOSING)
         || ~0ull == lsquic_senhist_largest(&conn->ifc_send_ctl.sc_senhist)
         || lsquic_senhist_largest(&conn->ifc_send_ctl.sc_senhist) < 30
         || lsquic_send_ctl_in_recovery(&conn->ifc_send_ctl)
         || !lsquic_send_ctl_can_send_probe(&conn->ifc_send_ctl,
-                                                        &cpath->cop_path))
+                                                        &cpath->cop_path)) /* cwnd和pacer判断 */
     {
         return;
     }
 
+    /*
+     * 计算mtu_ceiling, 表示最大可探测的MTU大小
+     * - 如果之前探测失败了, 不能超过失败的大小
+     * - 如果有配置最大大小则使用(默认没配置)
+     * - 否则按照默认的MTU最大探测大小: ipv4 1472, ipv6 1452
+     */
     if (ds->ds_failed_size)
         mtu_ceiling = ds->ds_failed_size;
-    else if (conn->ifc_settings->es_max_plpmtu)
+    else if (conn->ifc_settings->es_max_plpmtu) /* 默认没配置 */
         mtu_ceiling = conn->ifc_settings->es_max_plpmtu;
     else
     {
+        /* 按照默认的MTU最大探测大小: ipv4 1472, ipv6 1452 */
         net_header_sz = TRANSPORT_OVERHEAD(NP_IS_IPv6(&cpath->cop_path));
         mtu_ceiling = 1500 - net_header_sz;
     }
 
+    /* 不能超过对端配置的最大MTU大小 */
     if (conn->ifc_max_udp_payload < mtu_ceiling)
     {
         LSQ_DEBUG("cap MTU ceiling to peer's max_udp_payload_size TP of %hu "
@@ -8278,6 +8310,7 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
         mtu_ceiling = conn->ifc_max_udp_payload;
     }
 
+    /* 当前的MTU已经最大了或者达到99%了, 后续也不需要进行MTU探测了 */
     if (cpath->cop_path.np_pack_size >= mtu_ceiling
         || (float) cpath->cop_path.np_pack_size / (float) mtu_ceiling >= 0.99)
     {
@@ -8286,7 +8319,7 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
             cpath->cop_path.np_path_id,
             100. * (float) cpath->cop_path.np_pack_size / (float) mtu_ceiling,
             cpath->cop_path.np_pack_size, ds->ds_failed_size);
-        conn->ifc_mflags &= ~MF_CHECK_MTU_PROBE;
+        conn->ifc_mflags &= ~MF_CHECK_MTU_PROBE; /* 不会再MTU探测了 */
         return;
     }
 
@@ -8294,22 +8327,34 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
         cpath->cop_path.np_pack_size, mtu_ceiling,
         (float) cpath->cop_path.np_pack_size / (float) mtu_ceiling);
 
+    /*
+     * 计算probe_sz, 表示本次要发送的MTU探测包大小
+     * - 首次探测则使用最大的MTU大小
+     * - 否则若当前MTU超过最大MTU的一半时: 使用当前MTU和最大MTU的平均值
+     * - 否则使用当前MTU的2倍大小
+     */
     if (!ds->ds_failed_size && mtu_ceiling < 1500)
         /* Try the largest ethernet MTU immediately */
         probe_sz = mtu_ceiling;
     else if (cpath->cop_path.np_pack_size * 2 >= mtu_ceiling)
         /* Pick half-way point */
-        probe_sz = (mtu_ceiling + cpath->cop_path.np_pack_size) / 2;
+        probe_sz = (mtu_ceiling + cpath->cop_path.np_pack_size) / 2; /* 平均值 */
     else
-        probe_sz = cpath->cop_path.np_pack_size * 2;
+        probe_sz = cpath->cop_path.np_pack_size * 2; /* 当前2倍探测 */
 
+    /* 以下发送MTU探测包
+     * 原理是临时将MTU大小(np_pack_size)改为probe_sz,
+     * 分配一个新的packet就按照probe_sz大小分配,
+     * 然后写入PING帧(1B)+PADDING帧, 最后加入scheduled队列发送
+     */
     /* XXX Changing np_pack_size is action at a distance */
     saved_packet_sz = cpath->cop_path.np_pack_size;
-    cpath->cop_path.np_pack_size = probe_sz;
+    cpath->cop_path.np_pack_size = probe_sz; /* 临时改变当前MTU大小 */
     packet_out = lsquic_send_ctl_new_packet_out(&conn->ifc_send_ctl,
                                                         0, PNS_APP, CUR_NPATH(conn));
     if (!packet_out)
         goto restore_packet_size;
+    /* 写入PING帧, 实际只有1字节 */
     sz = conn->ifc_conn.cn_pf->pf_gen_ping_frame(
                             packet_out->po_data + packet_out->po_data_sz,
                             lsquic_packet_out_avail(packet_out));
@@ -8325,12 +8370,13 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
     avail = lsquic_packet_out_avail(packet_out);
     if (avail)
     {
+        /* pacekt剩余的部分全部清零, 也就是PADDING帧 */
         memset(packet_out->po_data + packet_out->po_data_sz, 0, avail);
         lsquic_send_ctl_incr_pack_sz(&conn->ifc_send_ctl, packet_out, avail);
         packet_out->po_frame_types |= 1 << QUIC_FRAME_PADDING;
     }
     packet_out->po_flags |= PO_MTU_PROBE;
-    lsquic_send_ctl_scheduled_one(&conn->ifc_send_ctl, packet_out);
+    lsquic_send_ctl_scheduled_one(&conn->ifc_send_ctl, packet_out); /* 发送 */
     LSQ_DEBUG("generated MTU probe of %hu bytes in packet %"PRIu64,
                         cpath->cop_path.np_pack_size, packet_out->po_packno);
 #ifndef NDEBUG
@@ -8342,13 +8388,17 @@ check_or_schedule_mtu_probe (struct ietf_full_conn *conn, lsquic_time_t now)
     ++ds->ds_probe_count;
     conn->ifc_mflags &= ~MF_CHECK_MTU_PROBE;
     assert(!lsquic_alarmset_is_set(&conn->ifc_alset, AL_MTU_PROBE));
+    /* 设置MTU探测定时器(1秒), 定时器函数mtu_probe_alarm_expired()
+     * 到期重新设置MF_CHECK_MTU_PROBE标志位, 来进行发送MTU探测
+     */
     lsquic_alarmset_set(&conn->ifc_alset, AL_MTU_PROBE,
                                 now + conn->ifc_enpub->enp_mtu_probe_timer);
   restore_packet_size:
-    cpath->cop_path.np_pack_size = saved_packet_sz;
+    cpath->cop_path.np_pack_size = saved_packet_sz; /* 还原MTU大小 */
 }
 
 
+/* MTU探测包被确认后调用, 更新MTU大小 */
 static void
 ietf_full_conn_ci_mtu_probe_acked (struct lsquic_conn *lconn,
                                    const struct lsquic_packet_out *packet_out)
@@ -8370,17 +8420,20 @@ ietf_full_conn_ci_mtu_probe_acked (struct lsquic_conn *lconn,
     ds->ds_flags &= ~DS_PROBE_SENT;
     ds->ds_probe_count = 0;
 
+    /* MTU探测包被确认：设置新的MTU大小 = MTU探测包大小 */
     cpath->cop_path.np_pack_size = lsquic_packet_out_sent_sz(&conn->ifc_conn,
                                                                     packet_out);
     LSQ_INFO("update path %hhu MTU to %hu bytes", path_id,
                                                 cpath->cop_path.np_pack_size);
     conn->ifc_mflags &= ~MF_CHECK_MTU_PROBE;
+    /* 设置定时器: 1秒后再次进行MTU探测 */
     lsquic_alarmset_set(&conn->ifc_alset, AL_MTU_PROBE,
                 packet_out->po_sent + conn->ifc_enpub->enp_mtu_probe_timer);
     LSQ_DEBUG("set alarm to %"PRIu64" usec ", packet_out->po_sent + conn->ifc_enpub->enp_mtu_probe_timer);
 }
 
 
+/* sendmsg返回-EMSGSIZE被调用, 说明MTU探测失败了 */
 static void
 mtu_probe_too_large (struct ietf_full_conn *conn,
                                 const struct lsquic_packet_out *packet_out)
@@ -8390,6 +8443,7 @@ mtu_probe_too_large (struct ietf_full_conn *conn,
 
     path_id = packet_out->po_path->np_path_id;
     cpath = &conn->ifc_paths[path_id];
+    /* 记录MTU探测失败的大小 */
     cpath->cop_dplpmtud.ds_failed_size
                     = lsquic_packet_out_sent_sz(&conn->ifc_conn, packet_out);
 }
@@ -8690,6 +8744,7 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
             }
     }
 
+    /* 发送MTU探测包 */
     if (conn->ifc_mflags & MF_CHECK_MTU_PROBE)
         check_or_schedule_mtu_probe(conn, now);
 

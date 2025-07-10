@@ -129,6 +129,7 @@ typedef struct lsquic_packet_out
                                          *   otherwise unset.
                                          */
         PO_MTU_PROBE= (1 <<21),         /* Special loss and ACK rules apply */
+                                        /* 表示这是一个MTU PROBE包(PING+PADDING帧) */
 #define POPNS_SHIFT 22
         PO_PNS_HSK  = (1 <<22),         /* PNS bits contain the value of the */
         PO_PNS_APP  = (1 <<23),         /*   packet number space. */
@@ -189,7 +190,7 @@ typedef struct lsquic_packet_out
                                         /* 表示被sc_next_limit限制时发送, 比如RTO触发时会设置只能发送两个包 */
         POL_FACKED   = 1 << 11,         /* Lost due to FACK check *//* 表示被FACK标记丢失 */
     }                  po_lflags:16;
-    unsigned char     *po_data;         /* 包的数据实体 */
+    unsigned char     *po_data;         /* 包的数据实体(不包括QUIC包首部) */
 
     /* A lot of packets contain only one frame.  Thus, `one' is used first.
      * If this is not enough, any number of frame_rec_arr structures can be

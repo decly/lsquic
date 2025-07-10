@@ -1144,7 +1144,7 @@ send_ctl_handle_lost_packet (struct lsquic_send_ctl *ctl,
 {
     if (0 == (packet_out->po_flags & PO_MTU_PROBE))
         return send_ctl_handle_regular_lost_packet(ctl, packet_out, next) != NULL;
-    else
+    else /* MTU探测包丢了直接删除就行 */
         return send_ctl_handle_lost_mtu_probe(ctl, packet_out);
 }
 
@@ -1291,6 +1291,7 @@ send_ctl_mtu_probe_acked (struct lsquic_send_ctl *ctl,
     LSQ_DEBUG("MTU probe in packet #%"PRIu64" has been ACKed",
                                                         packet_out->po_packno);
     assert(lconn->cn_if->ci_mtu_probe_acked);
+    /* iquic调用ietf_full_conn_ci_mtu_probe_acked() */
     if (lconn->cn_if->ci_mtu_probe_acked)
         lconn->cn_if->ci_mtu_probe_acked(lconn, packet_out);
 }
@@ -1454,11 +1455,11 @@ lsquic_send_ctl_got_ack (lsquic_send_ctl_t *ctl,
                 ++ctl->sc_conn_pub->conn_stats->out.acked_via_loss;
 #endif
             }
-            else if (packet_out->po_flags & PO_MTU_PROBE)
+            else if (packet_out->po_flags & PO_MTU_PROBE) /* MTU探测包被确认 */
             {
                 packet_sz = packet_out_sent_sz(packet_out);
                 send_ctl_unacked_remove(ctl, packet_out, packet_sz);
-                send_ctl_mtu_probe_acked(ctl, packet_out);
+                send_ctl_mtu_probe_acked(ctl, packet_out); /* 更新MTU大小 */
             }
             else
             {
@@ -4113,12 +4114,14 @@ lsquic_send_ctl_can_send_probe (const struct lsquic_send_ctl *ctl,
     cwnd = ctl->sc_ci->cci_get_cwnd(CGP(ctl));
     if (ctl->sc_flags & SC_PACE)
     {
+        /* 在cwnd范围内 */
         if (n_out + path->np_pack_size >= cwnd)
             return 0;
         pacing_rate = ctl->sc_ci->cci_pacing_rate(CGP(ctl), 0);
         if (!pacing_rate)
             pacing_rate = 1;
-        tx_time = (uint64_t) path->np_pack_size * 1000000 / pacing_rate;
+        tx_time = (uint64_t) path->np_pack_size * 1000000 / pacing_rate; /* 一个包发送的时间 */
+        /* 判断pacer当前能否发送MTU PROBE */
         return lsquic_pacer_can_schedule_probe(&ctl->sc_pacer,
                    ctl->sc_n_scheduled + ctl->sc_n_in_flight_all, tx_time);
     }

@@ -750,6 +750,10 @@ lsquic_gquic_full_conn_client_new (struct lsquic_engine_public *enpub,
     lsquic_generate_cid_gquic(&cid);
     if (!max_packet_size)
     {
+        /* gquic使用固定的MTU大小: ipv4为1370，ipv6为1350
+         * 客户端connect时按照上面设置固定MTU，发送的Client Hello包即是MTU大小,
+         * 而服务端根据收到的第一个握手包(Client Hello)的大小设置为MTU(lsquic_mini_conn_new中设置)
+         */
         if (enpub->enp_settings.es_base_plpmtu)
             max_packet_size = enpub->enp_settings.es_base_plpmtu;
         else if (is_ipv4)

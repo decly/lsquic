@@ -967,6 +967,7 @@ struct lsquic_engine_settings {
      *
      * Default value is @ref LSQUIC_DF_DPLPMTUD
      */
+    /* PMTUD(动态MTU探测), 默认开启 */
     int             es_dplpmtud;
 
     /**
@@ -975,6 +976,13 @@ struct lsquic_engine_settings {
      * If set to zero, this value is calculated based on QUIC and IP versions.
      *
      * Default value is @ref LSQUIC_DF_BASE_PLPMTU.
+     */
+    /* 配置默认的MTU大小(包含QUIC首部的大小)
+     * 默认没配置按照:
+     *   gquic: GQUIC_MAX_IPv4_PACKET_SZ
+     *          GQUIC_MAX_IPv6_PACKET_SZ
+     *   iquic: IQUIC_MAX_IPv4_PACKET_SZ
+     *          IQUIC_MAX_IPv6_PACKET_SZ
      */
     unsigned short  es_base_plpmtu;
 
@@ -985,6 +993,7 @@ struct lsquic_engine_settings {
      *
      * Default value is @ref LSQUIC_DF_MAX_PLPMTU.
      */
+    /* 可配置MTU探测的最大大小, 默认为0, 表示按默认的ipv4 1472, ipv6 1452 */
     unsigned short  es_max_plpmtu;
 
     /**
@@ -1002,6 +1011,7 @@ struct lsquic_engine_settings {
      *
      * Default value is @ref LSQUIC_DF_MTU_PROBE_TIMER.
      */
+    /* MTU探测的间隔时间, 默认1秒 */
     unsigned        es_mtu_probe_timer;
 
     /**

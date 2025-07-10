@@ -2,6 +2,7 @@
 #ifndef LSQUIC_PACKET_IETF_H
 #define LSQUIC_PACKET_IETF_H 1
 
+/* iquic默认的MTU大小(从QUIC首部开始) */
 #define IQUIC_MAX_IPv4_PACKET_SZ 1252
 #define IQUIC_MAX_IPv6_PACKET_SZ 1232
 

@@ -635,7 +635,12 @@ lsquic_mini_conn_ietf_new (struct lsquic_engine_public *enpub,
     conn->imc_enpub = enpub;
     conn->imc_expire = packet_in->pi_received +
                             enpub->enp_settings.es_handshake_to;
-    /* 设置默认MSS, ipv4 1252, ipv6 1232 */
+    /* 可以支持配置默认的MTU(默认没配置), 否则按默认MTU, ipv4-1252, ipv6-1232
+     * 但是这里的is_ipv4判断不准确: 
+     *   这里是按客户端地址是否v6地址来判断的, 但是没有考虑v4-mapped地址,
+     *   当服务端是ipv6 socket, 传递对应的客户端地址是v4-mapped地址, 就会
+     *   判定为ipv6.
+     */
     if (enpub->enp_settings.es_base_plpmtu)
         conn->imc_path.np_pack_size = enpub->enp_settings.es_base_plpmtu;
     else if (is_ipv4)

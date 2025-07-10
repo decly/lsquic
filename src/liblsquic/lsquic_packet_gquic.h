@@ -66,6 +66,7 @@ enum PACKET_PUBLIC_FLAGS
 #define GQUIC_PACKET_HASH_SZ 12
 
 /* [draft-hamilton-quic-transport-protocol-01], Section 7 */
+/* gquic默认的MTU大小(从QUIC首部开始), gquic的MTU大小是固定的 */
 #define GQUIC_MAX_IPv4_PACKET_SZ 1370
 #define GQUIC_MAX_IPv6_PACKET_SZ 1350
 

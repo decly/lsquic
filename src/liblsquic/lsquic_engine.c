@@ -2662,6 +2662,7 @@ send_batch (lsquic_engine_t *engine, const struct send_batch_ctx *sb_ctx,
         engine->resume_sending_at = now + 1000000;
         LSQ_DEBUG("cannot send packets");
         EV_LOG_GENERIC_EVENT("cannot send packets");
+        /* 非EAGAIN和EWOULDBLOCK错误, 直接断开连接 */
         if (!(EAGAIN == e_val || EWOULDBLOCK == e_val))
             close_conn_on_send_error(engine, sb_ctx,
                                         n_sent < 0 ? 0 : n_sent, e_val);
@@ -2711,6 +2712,9 @@ send_batch (lsquic_engine_t *engine, const struct send_batch_ctx *sb_ctx,
     if (i < (int) n_to_send && e_val == EMSGSIZE)
     {
         LSQ_DEBUG("packet #%d could not be sent out for being too large", i);
+        /* 发送时sendmsg返回-EMSGSIZE, 说明超过路由记录的MTU大小了,
+         * iquic调用ietf_full_conn_ci_packet_too_large()来记录MTU探测失败
+         */
         if (batch->conns[i]->cn_if->ci_packet_too_large
                                                 && batch->outs[i].iovlen == 1)
         {

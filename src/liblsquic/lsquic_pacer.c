@@ -136,12 +136,16 @@ lsquic_pacer_can_schedule (struct pacer *pacer, unsigned n_in_flight)
 }
 
 
+/* 判断当前能否发送MTU PROBE */
 int
 lsquic_pacer_can_schedule_probe (const struct pacer *pacer,
                                     unsigned n_in_flight, lsquic_time_t tx_time)
 {
-    return pacer->pa_burst_tokens > 1 /* Double packet size, want two tokens */
-        || n_in_flight == 0
+    return pacer->pa_burst_tokens > 1 /* Double packet size, want two tokens *//* 至少有剩余2个burst */
+        || n_in_flight == 0 /* 链路是空的可以发送MTU PROBE */
+        /* 下次发送时间 超过 当前tick+半个包的时间 就能发送MTU PROBE
+         * 因为是考虑到尽量避开和流帧同时发送?
+         */
         || pacer->pa_next_sched > pacer->pa_now + tx_time / 2;
 }
 

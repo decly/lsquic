@@ -224,16 +224,18 @@ lsquic_packet_out_new (struct lsquic_mm *mm, struct malo *malo, int use_cid,
                                                 != LSCONN_HANDSHAKE_DONE)
         flags |= PO_LONGHEAD;
 
+    /* QUIC包头大小 */
     header_size = lconn->cn_pf->pf_packout_max_header_size(lconn, flags,
                                             path->np_dcid.len, header_type);
     tag_len = lconn->cn_esf_c->esf_tag_len;
-    max_size = path->np_pack_size;
+    max_size = path->np_pack_size; /* 当前MTU大小 */
     if (header_size + tag_len >= max_size)
     {
         errno = EINVAL;
         return NULL;
     }
 
+    /* 分配大小为 MTU - QUIC包首部大小, 即可写帧的大小 */
     packet_out = lsquic_mm_get_packet_out(mm, malo, max_size - header_size
                                                 - tag_len);
     if (!packet_out)

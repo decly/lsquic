@@ -49,6 +49,7 @@ lsquic_gquic_parse_packet_in_begin (lsquic_packet_in_t *packet_in,
     const unsigned char *p = packet_in->pi_data;
     const unsigned char *const pend = packet_in->pi_data + length;
 
+    /* gquic收到超过1370的包直接丢弃 */
     if (length > GQUIC_MAX_PACKET_SZ)
     {
         LSQ_DEBUG("Cannot handle packet_in_size(%zd) > %d packet incoming "
